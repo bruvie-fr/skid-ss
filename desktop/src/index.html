@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SkidSS Studio</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">SkidSS <span>Studio</span></div>
+      <nav class="tabs">
+        <button class="tab active" data-tab="script">Script</button>
+        <button class="tab" data-tab="interface">Interface</button>
+        <button class="tab" data-tab="runtime">Runtime</button>
+        <button class="tab" data-tab="config">Config</button>
+      </nav>
+      <div class="actions">
+        <span id="status" class="status"></span>
+        <button id="copyBtn" class="btn">Copy Luau</button>
+        <button id="copyBundleBtn" class="btn">Copy .lua</button>
+        <select id="buildClass" class="topselect" title="Container type">
+          <option value="Script">Script</option>
+          <option value="ModuleScript">ModuleScript</option>
+        </select>
+        <button id="buildBtn" class="btn primary">Build .rbxmx…</button>
+      </div>
+    </header>
+
+    <main>
+      <section class="editor">
+        <div id="scriptWorkspace" class="workspace"></div>
+
+        <div id="interfacePane" class="builder hidden">
+          <div class="builder-toolbar">
+            <span class="builder-title">Add element:</span>
+            <button class="btn small primary" data-preset="executor">+ Executor preset</button>
+            <span class="tool-sep"></span>
+            <button class="btn small" data-add="panel">Panel</button>
+            <button class="btn small" data-add="label">Label</button>
+            <button class="btn small" data-add="button">Button</button>
+            <button class="btn small" data-add="image">Image</button>
+            <button class="btn small" data-add="codebox">Code box</button>
+            <button class="btn small" data-add="output">Output</button>
+            <span class="builder-hint">drag to move · drag corners to resize · click to select</span>
+          </div>
+          <div class="canvas-wrap">
+            <div id="ifCanvas" class="canvas"></div>
+          </div>
+        </div>
+
+        <div id="runtimePane" class="config-pane hidden">
+          <div class="config-section">
+            <div class="config-section-head">
+              <h3>Actions</h3>
+              <button class="btn small" id="addActionBtn">+ add</button>
+            </div>
+            <p class="hint">Named server-side actions. Wire them to executor buttons in the Interface tab.</p>
+            <div id="actionRows" class="action-list"></div>
+          </div>
+
+          <div class="config-section">
+            <div class="config-section-head">
+              <h3>When a player joins</h3>
+              <button class="btn small" id="addJoinBtn">+ add</button>
+            </div>
+            <div id="joinRows" class="action-list"></div>
+          </div>
+
+          <div class="config-section">
+            <div class="config-section-head">
+              <h3>When a player leaves</h3>
+              <button class="btn small" id="addLeaveBtn">+ add</button>
+            </div>
+            <div id="leaveRows" class="action-list"></div>
+          </div>
+
+          <div class="config-section">
+            <h3>Request gate</h3>
+            <label class="checkrow"><input id="rtGateLua" type="checkbox" /> Reject all raw-Lua requests (force everyone onto blocks)</label>
+          </div>
+        </div>
+
+        <div id="configPane" class="config-pane hidden">
+          <div class="config-section">
+            <div class="config-section-head">
+              <h3>Whitelist (UserIds)</h3>
+              <button class="btn small" id="addUserIdBtn">+ add</button>
+            </div>
+            <p class="hint">UserIds are safer than names — names can change. Find yours at roblox.com/users/&lt;id&gt;/profile.</p>
+            <div id="userIdRows" class="row-list"></div>
+          </div>
+
+          <div class="config-section">
+            <div class="config-section-head">
+              <h3>Whitelist (Names)</h3>
+              <button class="btn small" id="addNameBtn">+ add</button>
+            </div>
+            <p class="hint">Optional. Stored lower-case; case-insensitive at match time.</p>
+            <div id="nameRows" class="row-list"></div>
+          </div>
+
+          <div class="config-section">
+            <h3>Server limits</h3>
+            <p class="hint">Safety caps for block scripts. Lowering them protects performance; raising helps long jobs.</p>
+            <div class="grid">
+              <label>Max steps per program
+                <input id="cfgMaxSteps" type="number" min="1000" step="10000" />
+              </label>
+              <label>Max loop iterations
+                <input id="cfgMaxLoopIterations" type="number" min="1000" step="1000" />
+              </label>
+              <label>Max wait seconds
+                <input id="cfgMaxWaitSeconds" type="number" min="1" max="600" step="1" />
+              </label>
+            </div>
+          </div>
+
+          <div class="config-section">
+            <h3>Round-trip</h3>
+            <p class="hint">Load CONFIG from an existing SkidSS.lua to edit it here, then re-export.</p>
+            <button class="btn" id="loadConfigBtn">Load from existing SkidSS.lua…</button>
+          </div>
+        </div>
+      </section>
+
+      <aside class="side">
+        <div id="ifSide" class="side-scroll hidden">
+          <div class="config-section">
+            <h3>Selected element</h3>
+            <div id="ifProps"><div class="empty">Click an element on the canvas to edit it.</div></div>
+          </div>
+          <div class="config-section">
+            <h3>Window</h3>
+            <p class="hint">The toggle-key executor window. Your elements above load as an always-on HUD.</p>
+            <div class="grid">
+              <label>Title <input id="ifTitle" type="text" placeholder="SkidSS" /></label>
+              <label>Toggle key
+                <select id="ifToggleKey">
+                  <option>RightShift</option>
+                  <option>LeftShift</option>
+                  <option>RightControl</option>
+                  <option>RightAlt</option>
+                  <option>F2</option>
+                  <option>F3</option>
+                  <option>F4</option>
+                  <option>Insert</option>
+                  <option>Home</option>
+                  <option>Backquote</option>
+                </select>
+              </label>
+              <label>Width <input id="ifWidth" type="number" min="420" step="20" /></label>
+              <label>Height <input id="ifHeight" type="number" min="300" step="20" /></label>
+            </div>
+            <div class="grid">
+              <label>Accent <input id="ifAccent" type="color" /></label>
+              <label>Background <input id="ifBackground" type="color" /></label>
+              <label>Panel <input id="ifPanel" type="color" /></label>
+              <label>Text <input id="ifText" type="color" /></label>
+            </div>
+            <label class="checkrow"><input id="ifOpenOnJoin" type="checkbox" /> Open the executor window on join (off = custom HUD only, toggle key opens it)</label>
+          </div>
+        </div>
+
+        <div class="code">
+          <div class="code-head">Generated Luau</div>
+          <pre id="codeOut"></pre>
+        </div>
+      </aside>
+    </main>
+
+    <script src="vendor/blockly/blockly_compressed.js"></script>
+    <script src="vendor/blockly/blocks_compressed.js"></script>
+    <script src="vendor/blockly/msg/en.js"></script>
+    <script src="vendor/blockly/lua_compressed.js"></script>
+    <script src="blocks.js"></script>
+    <script src="luau.js"></script>
+    <script src="codegen.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,2212 @@
+-- SkidSS — paste this entire Script into ServerScriptService.
+--
+-- 1) Edit the WHITELIST tables below with your UserId(s),
+--    or use SkidSS Studio to fill the CONFIG section for you.
+-- 2) Save and play. Whitelisted players get the executor on join.
+--
+-- This script must be installed by the owner of the game (or a developer they
+-- explicitly authorised). It runs server-side and grants script execution to
+-- whitelisted players.
+--
+-- How it works: on first run the script's server-side half wires up the
+-- remotes; for each whitelisted player it clones itself with
+-- RunContext = Client into the player's PlayerGui, where the same source
+-- branches via RunService:IsClient() and runs the executor UI.
+
+-- ===== CONFIG (edit me, or use Studio to fill these in) =====
+-- Whitelist tables are HASH tables keyed by the UserId or name.
+-- Example: { [123456789] = true, [987654321] = true }   <-- not { 123456789 }
+-- Names go in quotes, lower-case: { ["yourname"] = true }
+local WHITELIST_USERIDS = {}
+local WHITELIST_NAMES = {}
+local SETTINGS = {
+	maxSteps = 200000,
+	maxLoopIterations = 100000,
+	maxWaitSeconds = 30,
+}
+-- ===== END CONFIG =====
+
+-- ===== CUSTOM RUNTIME (written by Studio; safe to overwrite) =====
+local CustomRuntime = {
+	onPlayerAdded = function(_player) end,
+	onPlayerRemoving = function(_player) end,
+	onRequestReceived = function(_player, _payload) return true end,
+	customActions = {},
+}
+-- ===== END CUSTOM RUNTIME =====
+
+-- ===== CUSTOM INTERFACE (written by Studio; safe to overwrite) =====
+local CustomInterface = function() return {} end
+-- ===== END CUSTOM INTERFACE =====
+
+local RunService = game:GetService("RunService")
+
+-- ===== SHARED MODULES (run on both sides) =====
+local SkidSS_Config = (function()
+-- Shared, replicated settings. Clients can read this, so keep no secrets here.
+
+local Config = {}
+
+Config.Version = "0.1.0"
+Config.NetFolder = "SkidSS_Net"
+
+-- Server-enforced limits for block scripts so they can never hang the game.
+Config.Limits = {
+	MaxSteps = 200000,
+	MaxLoopIterations = 100000,
+	MaxWaitSeconds = 30,
+}
+
+Config.UI = {
+	ToggleKey = Enum.KeyCode.RightShift,
+	Accent = Color3.fromRGB(124, 92, 255),
+	Background = Color3.fromRGB(22, 22, 28),
+	Panel = Color3.fromRGB(32, 32, 42),
+	PanelAlt = Color3.fromRGB(42, 42, 54),
+	Text = Color3.fromRGB(236, 236, 246),
+	SubText = Color3.fromRGB(150, 150, 165),
+	Good = Color3.fromRGB(95, 200, 130),
+	Bad = Color3.fromRGB(235, 95, 110),
+}
+
+return Config
+end)()
+
+local SkidSS_Util = (function()
+-- Small shared helpers.
+
+local Util = {}
+
+local idCounter = 0
+
+function Util.newId()
+	idCounter += 1
+	return "n" .. idCounter
+end
+
+function Util.deepCopy(value)
+	if typeof(value) ~= "table" then
+		return value
+	end
+	local copy = {}
+	for key, child in value do
+		copy[key] = Util.deepCopy(child)
+	end
+	return copy
+end
+
+return Util
+end)()
+
+local SkidSS_Net = (function()
+-- Remote object names, plus build (server) and get (client) helpers.
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Config = SkidSS_Config
+
+local Net = {}
+
+Net.RequestAccess = "RequestAccess"
+Net.Execute = "Execute"
+Net.Output = "Output"
+
+function Net.build()
+	local folder = Instance.new("Folder")
+	folder.Name = Config.NetFolder
+
+	local request = Instance.new("RemoteFunction")
+	request.Name = Net.RequestAccess
+	request.Parent = folder
+
+	local execute = Instance.new("RemoteEvent")
+	execute.Name = Net.Execute
+	execute.Parent = folder
+
+	local output = Instance.new("RemoteEvent")
+	output.Name = Net.Output
+	output.Parent = folder
+
+	folder.Parent = ReplicatedStorage
+	return folder
+end
+
+function Net.get(name)
+	local folder = ReplicatedStorage:WaitForChild(Config.NetFolder)
+	return folder:WaitForChild(name)
+end
+
+return Net
+end)()
+
+local SkidSS_BlocksDefs = (function()
+-- Every block lives here. A def carries its shape (label/inputs/fields/bodies),
+-- how it runs (eval for values, exec for statements), and how it compiles to Lua.
+-- Add a block by calling register{}; the editor, interpreter and compiler pick it up automatically.
+
+local Util = SkidSS_Util
+
+local Defs = {}
+Defs.list = {}
+Defs.byId = {}
+Defs.categories = {}
+Defs.categoryOrder = {}
+
+local function register(def)
+	Defs.byId[def.id] = def
+	table.insert(Defs.list, def)
+	if not Defs.categories[def.category] then
+		Defs.categories[def.category] = {}
+		table.insert(Defs.categoryOrder, def.category)
+	end
+	table.insert(Defs.categories[def.category], def)
+end
+
+function Defs.lit(value, vtype)
+	return { type = "_literal", fields = { value = value, vtype = vtype or "string" } }
+end
+
+function Defs.instantiate(id)
+	local def = assert(Defs.byId[id], "unknown block " .. tostring(id))
+	local node = { type = id }
+	if def.inputs then
+		node.inputs = {}
+		for _, input in def.inputs do
+			node.inputs[input.name] = Util.deepCopy(input.default)
+		end
+	end
+	if def.fields then
+		node.fields = {}
+		for _, field in def.fields do
+			node.fields[field.name] = field.default
+		end
+	end
+	if def.bodies then
+		node.bodies = {}
+		for _, body in def.bodies do
+			node.bodies[body] = {}
+		end
+	end
+	return node
+end
+
+local COMPARE = { "==", "~=", "<", ">", "<=", ">=" }
+
+local function applyCompare(a, b, op)
+	if op == "==" then return a == b end
+	if op == "~=" then return a ~= b end
+	a = tonumber(a) or 0
+	b = tonumber(b) or 0
+	if op == "<" then return a < b end
+	if op == ">" then return a > b end
+	if op == "<=" then return a <= b end
+	if op == ">=" then return a >= b end
+	return false
+end
+
+local function compareLua(node, c)
+	return "(" .. c.in_("a") .. " " .. node.fields.op .. " " .. c.in_("b") .. ")"
+end
+
+local function resolveTarget(node, state)
+	if node.fields.targetMode == "name" then
+		return state.api.findPlayer(node.fields.targetName)
+	end
+	return state.vars["player"]
+end
+
+local function targetLua(node, c)
+	if node.fields.targetMode == "name" then
+		return "_findPlayer(" .. c.q(node.fields.targetName) .. ")"
+	end
+	return '_vars["player"]'
+end
+
+local function targetFields()
+	return {
+		{ name = "targetMode", kind = "choice", choices = { "loop", "name" }, default = "loop" },
+		{ name = "targetName", kind = "text", default = "" },
+	}
+end
+
+-- Values -------------------------------------------------------------------
+
+register({
+	id = "_literal", category = "Values", kind = "value", side = "both", hidden = true,
+	eval = function(node)
+		local value, vtype = node.fields.value, node.fields.vtype
+		if vtype == "number" then return tonumber(value) or 0 end
+		if vtype == "boolean" then return value == true or value == "true" end
+		return tostring(value)
+	end,
+	toLua = function(node, c)
+		local value, vtype = node.fields.value, node.fields.vtype
+		if vtype == "number" then return tostring(tonumber(value) or 0) end
+		if vtype == "boolean" then return (value == true or value == "true") and "true" or "false" end
+		return c.q(tostring(value))
+	end,
+})
+
+register({
+	id = "color_rgb", category = "Values", kind = "value", side = "both",
+	label = "color %r %g %b",
+	inputs = {
+		{ name = "r", default = Defs.lit(124, "number") },
+		{ name = "g", default = Defs.lit(92, "number") },
+		{ name = "b", default = Defs.lit(255, "number") },
+	},
+	eval = function(node, ctx)
+		return Color3.fromRGB(
+			math.clamp(tonumber(ctx.eval(node.inputs.r)) or 0, 0, 255),
+			math.clamp(tonumber(ctx.eval(node.inputs.g)) or 0, 0, 255),
+			math.clamp(tonumber(ctx.eval(node.inputs.b)) or 0, 0, 255)
+		)
+	end,
+	toLua = function(node, c)
+		return "Color3.fromRGB(" .. c.in_("r") .. ", " .. c.in_("g") .. ", " .. c.in_("b") .. ")"
+	end,
+})
+
+-- Variables ----------------------------------------------------------------
+
+register({
+	id = "var_get", category = "Variables", kind = "value", side = "both",
+	label = "value of %name",
+	fields = { { name = "name", kind = "text", default = "x" } },
+	eval = function(node, ctx, state) return state.vars[node.fields.name] end,
+	toLua = function(node, c) return "_vars[" .. c.q(node.fields.name) .. "]" end,
+})
+
+register({
+	id = "set_var", category = "Variables", kind = "statement", side = "both",
+	label = "set %name to %value",
+	fields = { { name = "name", kind = "text", default = "x" } },
+	inputs = { { name = "value", default = Defs.lit(0, "number") } },
+	exec = function(node, ctx, state) state.vars[node.fields.name] = ctx.eval(node.inputs.value) end,
+	toLua = function(node, c) return c.pad .. "_vars[" .. c.q(node.fields.name) .. "] = " .. c.in_("value") end,
+})
+
+register({
+	id = "change_var", category = "Variables", kind = "statement", side = "both",
+	label = "change %name by %by",
+	fields = { { name = "name", kind = "text", default = "x" } },
+	inputs = { { name = "by", default = Defs.lit(1, "number") } },
+	exec = function(node, ctx, state)
+		local name = node.fields.name
+		state.vars[name] = (tonumber(state.vars[name]) or 0) + (tonumber(ctx.eval(node.inputs.by)) or 0)
+	end,
+	toLua = function(node, c)
+		local name = c.q(node.fields.name)
+		return c.pad .. "_vars[" .. name .. "] = (tonumber(_vars[" .. name .. "]) or 0) + (" .. c.in_("by") .. ")"
+	end,
+})
+
+-- Operators ----------------------------------------------------------------
+
+register({
+	id = "op_arith", category = "Operators", kind = "value", side = "both",
+	label = "%a %op %b",
+	fields = { { name = "op", kind = "choice", choices = { "+", "-", "*", "/", "%" }, default = "+" } },
+	inputs = { { name = "a", default = Defs.lit(1, "number") }, { name = "b", default = Defs.lit(1, "number") } },
+	eval = function(node, ctx)
+		local a = tonumber(ctx.eval(node.inputs.a)) or 0
+		local b = tonumber(ctx.eval(node.inputs.b)) or 0
+		local op = node.fields.op
+		if op == "+" then return a + b end
+		if op == "-" then return a - b end
+		if op == "*" then return a * b end
+		if op == "/" then return b ~= 0 and a / b or 0 end
+		if op == "%" then return b ~= 0 and a % b or 0 end
+		return 0
+	end,
+	toLua = function(node, c) return "(" .. c.in_("a") .. " " .. node.fields.op .. " " .. c.in_("b") .. ")" end,
+})
+
+register({
+	id = "op_concat", category = "Operators", kind = "value", side = "both",
+	label = "join %a %b",
+	inputs = { { name = "a", default = Defs.lit("", "string") }, { name = "b", default = Defs.lit("", "string") } },
+	eval = function(node, ctx) return tostring(ctx.eval(node.inputs.a)) .. tostring(ctx.eval(node.inputs.b)) end,
+	toLua = function(node, c) return "(tostring(" .. c.in_("a") .. ") .. tostring(" .. c.in_("b") .. "))" end,
+})
+
+-- Output -------------------------------------------------------------------
+
+register({
+	id = "print", category = "Output", kind = "statement", side = "both",
+	label = "print %text",
+	inputs = { { name = "text", default = Defs.lit("hello", "string") } },
+	exec = function(node, ctx, state) state.api.print(tostring(ctx.eval(node.inputs.text))) end,
+	toLua = function(node, c) return c.pad .. "print(" .. c.in_("text") .. ")" end,
+})
+
+register({
+	id = "warn", category = "Output", kind = "statement", side = "both",
+	label = "warn %text",
+	inputs = { { name = "text", default = Defs.lit("careful", "string") } },
+	exec = function(node, ctx, state) state.api.warn(tostring(ctx.eval(node.inputs.text))) end,
+	toLua = function(node, c) return c.pad .. "warn(" .. c.in_("text") .. ")" end,
+})
+
+-- Control ------------------------------------------------------------------
+
+register({
+	id = "wait", category = "Control", kind = "statement", side = "both",
+	label = "wait %seconds seconds",
+	inputs = { { name = "seconds", default = Defs.lit(1, "number") } },
+	exec = function(node, ctx, state)
+		task.wait(math.clamp(tonumber(ctx.eval(node.inputs.seconds)) or 0, 0, state.config.Limits.MaxWaitSeconds))
+	end,
+	toLua = function(node, c) return c.pad .. "task.wait(" .. c.in_("seconds") .. ")" end,
+})
+
+register({
+	id = "if_compare", category = "Control", kind = "statement", side = "both",
+	label = "if %a %op %b",
+	fields = { { name = "op", kind = "choice", choices = COMPARE, default = "==" } },
+	inputs = { { name = "a", default = Defs.lit(0, "number") }, { name = "b", default = Defs.lit(0, "number") } },
+	bodies = { "do" },
+	exec = function(node, ctx, state)
+		if applyCompare(ctx.eval(node.inputs.a), ctx.eval(node.inputs.b), node.fields.op) then
+			ctx.execBody(node, "do")
+		end
+	end,
+	toLua = function(node, c)
+		return c.pad .. "if " .. compareLua(node, c) .. " then\n" .. c.body("do") .. "\n" .. c.pad .. "end"
+	end,
+})
+
+register({
+	id = "if_else_compare", category = "Control", kind = "statement", side = "both",
+	label = "if %a %op %b",
+	fields = { { name = "op", kind = "choice", choices = COMPARE, default = "==" } },
+	inputs = { { name = "a", default = Defs.lit(0, "number") }, { name = "b", default = Defs.lit(0, "number") } },
+	bodies = { "do", "otherwise" },
+	exec = function(node, ctx, state)
+		if applyCompare(ctx.eval(node.inputs.a), ctx.eval(node.inputs.b), node.fields.op) then
+			ctx.execBody(node, "do")
+		else
+			ctx.execBody(node, "otherwise")
+		end
+	end,
+	toLua = function(node, c)
+		return c.pad .. "if " .. compareLua(node, c) .. " then\n" .. c.body("do")
+			.. "\n" .. c.pad .. "else\n" .. c.body("otherwise") .. "\n" .. c.pad .. "end"
+	end,
+})
+
+register({
+	id = "repeat_n", category = "Control", kind = "statement", side = "both",
+	label = "repeat %count times",
+	inputs = { { name = "count", default = Defs.lit(10, "number") } },
+	bodies = { "do" },
+	exec = function(node, ctx, state)
+		local n = math.min(math.floor(tonumber(ctx.eval(node.inputs.count)) or 0), state.config.Limits.MaxLoopIterations)
+		for _ = 1, n do
+			ctx.execBody(node, "do")
+		end
+	end,
+	toLua = function(node, c)
+		return c.pad .. "for _ = 1, " .. c.in_("count") .. " do\n" .. c.body("do") .. "\n" .. c.pad .. "end"
+	end,
+})
+
+register({
+	id = "while_compare", category = "Control", kind = "statement", side = "both",
+	label = "while %a %op %b",
+	fields = { { name = "op", kind = "choice", choices = COMPARE, default = "<" } },
+	inputs = { { name = "a", default = Defs.lit(0, "number") }, { name = "b", default = Defs.lit(10, "number") } },
+	bodies = { "do" },
+	exec = function(node, ctx, state)
+		while applyCompare(ctx.eval(node.inputs.a), ctx.eval(node.inputs.b), node.fields.op) do
+			ctx.execBody(node, "do")
+			ctx.tick()
+		end
+	end,
+	toLua = function(node, c)
+		return c.pad .. "while " .. compareLua(node, c) .. " do\n" .. c.body("do") .. "\n" .. c.pad .. "end"
+	end,
+})
+
+-- Players (server side) ----------------------------------------------------
+
+register({
+	id = "players_count", category = "Players", kind = "value", side = "server",
+	label = "player count",
+	eval = function(node, ctx, state) return #state.api.players() end,
+	toLua = function() return "#Players:GetPlayers()" end,
+})
+
+register({
+	id = "for_each_player", category = "Players", kind = "statement", side = "server",
+	label = "for each player",
+	bodies = { "do" },
+	exec = function(node, ctx, state)
+		for _, player in state.api.players() do
+			state.vars["player"] = player
+			ctx.execBody(node, "do")
+		end
+	end,
+	toLua = function(node, c)
+		return c.pad .. "for _, _p in Players:GetPlayers() do\n"
+			.. c.pad .. '\t_vars["player"] = _p\n' .. c.body("do") .. "\n" .. c.pad .. "end"
+	end,
+})
+
+register({
+	id = "kick_player", category = "Players", kind = "statement", side = "server",
+	label = "kick %targetMode %targetName reason %reason",
+	fields = targetFields(),
+	inputs = { { name = "reason", default = Defs.lit("Kicked", "string") } },
+	exec = function(node, ctx, state)
+		local player = resolveTarget(node, state)
+		if player then state.api.kick(player, tostring(ctx.eval(node.inputs.reason))) end
+	end,
+	toLua = function(node, c)
+		return c.pad .. "do local _t = " .. targetLua(node, c) .. "; if _t then _t:Kick(" .. c.in_("reason") .. ") end end"
+	end,
+})
+
+register({
+	id = "set_walkspeed", category = "Players", kind = "statement", side = "server",
+	label = "set walkspeed of %targetMode %targetName to %speed",
+	fields = targetFields(),
+	inputs = { { name = "speed", default = Defs.lit(16, "number") } },
+	exec = function(node, ctx, state)
+		local player = resolveTarget(node, state)
+		if player then state.api.setWalkSpeed(player, tonumber(ctx.eval(node.inputs.speed)) or 16) end
+	end,
+	toLua = function(node, c)
+		return c.pad .. "do local _t = " .. targetLua(node, c)
+			.. "; local _c = _t and _t.Character; local _h = _c and _c:FindFirstChildOfClass(\"Humanoid\"); if _h then _h.WalkSpeed = "
+			.. c.in_("speed") .. " end end"
+	end,
+})
+
+register({
+	id = "set_health", category = "Players", kind = "statement", side = "server",
+	label = "set health of %targetMode %targetName to %amount",
+	fields = targetFields(),
+	inputs = { { name = "amount", default = Defs.lit(100, "number") } },
+	exec = function(node, ctx, state)
+		local player = resolveTarget(node, state)
+		if player then state.api.setHealth(player, tonumber(ctx.eval(node.inputs.amount)) or 0) end
+	end,
+	toLua = function(node, c)
+		return c.pad .. "do local _t = " .. targetLua(node, c)
+			.. "; local _c = _t and _t.Character; local _h = _c and _c:FindFirstChildOfClass(\"Humanoid\"); if _h then _h.Health = "
+			.. c.in_("amount") .. " end end"
+	end,
+})
+
+register({
+	id = "teleport_to_player", category = "Players", kind = "statement", side = "server",
+	label = "teleport %targetMode %targetName to player %destName",
+	fields = {
+		{ name = "targetMode", kind = "choice", choices = { "loop", "name" }, default = "loop" },
+		{ name = "targetName", kind = "text", default = "" },
+		{ name = "destName", kind = "text", default = "" },
+	},
+	exec = function(node, ctx, state)
+		local player = resolveTarget(node, state)
+		local dest = state.api.findPlayer(node.fields.destName)
+		if player and dest then state.api.teleport(player, dest) end
+	end,
+	toLua = function(node, c)
+		return c.pad .. "do local _t = " .. targetLua(node, c) .. "; local _d = _findPlayer(" .. c.q(node.fields.destName)
+			.. "); if _t and _d and _t.Character and _d.Character then _t.Character:PivotTo(_d.Character:GetPivot()) end end"
+	end,
+})
+
+-- Interface (client side, edits the executor window itself) -----------------
+
+register({
+	id = "ui_set_title", category = "Interface", kind = "statement", side = "client",
+	label = "set window title to %text",
+	inputs = { { name = "text", default = Defs.lit("SkidSS", "string") } },
+	exec = function(node, ctx, state) state.api.setTitle(tostring(ctx.eval(node.inputs.text))) end,
+	toLua = function(node, c) return c.pad .. "ui.setTitle(" .. c.in_("text") .. ")" end,
+})
+
+register({
+	id = "ui_set_accent", category = "Interface", kind = "statement", side = "client",
+	label = "set accent color %r %g %b",
+	inputs = {
+		{ name = "r", default = Defs.lit(124, "number") },
+		{ name = "g", default = Defs.lit(92, "number") },
+		{ name = "b", default = Defs.lit(255, "number") },
+	},
+	exec = function(node, ctx, state)
+		state.api.setAccent(Color3.fromRGB(
+			math.clamp(tonumber(ctx.eval(node.inputs.r)) or 0, 0, 255),
+			math.clamp(tonumber(ctx.eval(node.inputs.g)) or 0, 0, 255),
+			math.clamp(tonumber(ctx.eval(node.inputs.b)) or 0, 0, 255)))
+	end,
+	toLua = function(node, c)
+		return c.pad .. "ui.setAccent(Color3.fromRGB(" .. c.in_("r") .. ", " .. c.in_("g") .. ", " .. c.in_("b") .. "))"
+	end,
+})
+
+register({
+	id = "ui_set_background", category = "Interface", kind = "statement", side = "client",
+	label = "set background color %r %g %b",
+	inputs = {
+		{ name = "r", default = Defs.lit(22, "number") },
+		{ name = "g", default = Defs.lit(22, "number") },
+		{ name = "b", default = Defs.lit(28, "number") },
+	},
+	exec = function(node, ctx, state)
+		state.api.setBackground(Color3.fromRGB(
+			math.clamp(tonumber(ctx.eval(node.inputs.r)) or 0, 0, 255),
+			math.clamp(tonumber(ctx.eval(node.inputs.g)) or 0, 0, 255),
+			math.clamp(tonumber(ctx.eval(node.inputs.b)) or 0, 0, 255)))
+	end,
+	toLua = function(node, c)
+		return c.pad .. "ui.setBackground(Color3.fromRGB(" .. c.in_("r") .. ", " .. c.in_("g") .. ", " .. c.in_("b") .. "))"
+	end,
+})
+
+register({
+	id = "ui_notify", category = "Interface", kind = "statement", side = "client",
+	label = "show toast %text",
+	inputs = { { name = "text", default = Defs.lit("hi", "string") } },
+	exec = function(node, ctx, state) state.api.notify(tostring(ctx.eval(node.inputs.text))) end,
+	toLua = function(node, c) return c.pad .. "ui.notify(" .. c.in_("text") .. ")" end,
+})
+
+register({
+	id = "ui_log", category = "Interface", kind = "statement", side = "client",
+	label = "log %text to console",
+	inputs = { { name = "text", default = Defs.lit("hi", "string") } },
+	exec = function(node, ctx, state) state.api.log(tostring(ctx.eval(node.inputs.text))) end,
+	toLua = function(node, c) return c.pad .. "ui.log(" .. c.in_("text") .. ")" end,
+})
+
+register({
+	id = "ui_add_button", category = "Interface", kind = "statement", side = "client",
+	label = "add quick button %label",
+	inputs = { { name = "label", default = Defs.lit("Run", "string") } },
+	exec = function(node, ctx, state) state.api.addButton(tostring(ctx.eval(node.inputs.label))) end,
+	toLua = function(node, c) return c.pad .. "ui.addButton(" .. c.in_("label") .. ")" end,
+})
+
+return Defs
+end)()
+
+local SkidSS_BlocksInterpreter = (function()
+-- Runs a block program (an array of statement nodes) against a host-supplied api.
+-- A step budget makes it impossible for a block script to hang the game, and the
+-- `allow` table lets the host reject blocks that aren't meant to run on its side.
+
+local Defs = SkidSS_BlocksDefs
+
+local Interpreter = {}
+
+function Interpreter.run(program, api, config, allow)
+	assert(type(program) == "table", "program must be a table")
+
+	local state = {
+		vars = {},
+		api = api,
+		config = config,
+		allow = allow or { server = true, client = true, both = true },
+		steps = 0,
+	}
+
+	local ctx = {}
+
+	function ctx.tick()
+		state.steps += 1
+		if state.steps > config.Limits.MaxSteps then
+			error("step limit reached (" .. config.Limits.MaxSteps .. ")", 0)
+		end
+	end
+
+	local function check(node, want)
+		local def = Defs.byId[node and node.type]
+		if not def or not def[want] then
+			error("expected a " .. want .. " block, got " .. tostring(node and node.type), 0)
+		end
+		if not state.allow[def.side] then
+			error("block '" .. def.id .. "' is not allowed here", 0)
+		end
+		return def
+	end
+
+	function ctx.eval(node)
+		ctx.tick()
+		return check(node, "eval").eval(node, ctx, state)
+	end
+
+	function ctx.exec(node)
+		ctx.tick()
+		check(node, "exec").exec(node, ctx, state)
+	end
+
+	function ctx.execBody(node, name)
+		local body = node.bodies and node.bodies[name]
+		if not body then return end
+		for _, child in body do
+			ctx.exec(child)
+		end
+	end
+
+	for _, node in program do
+		ctx.exec(node)
+	end
+
+	return state
+end
+
+return Interpreter
+end)()
+
+local SkidSS_BlocksLua = (function()
+-- Compiles a block program to readable Luau for the "View Lua" panel and export.
+
+local Defs = SkidSS_BlocksDefs
+
+local Lua = {}
+
+local function q(text)
+	return string.format("%q", tostring(text))
+end
+
+local function compileValue(node)
+	if type(node) ~= "table" then return "nil" end
+	local def = Defs.byId[node.type]
+	if not def or not def.toLua then return "nil" end
+	return def.toLua(node, {
+		q = q,
+		in_ = function(name) return compileValue(node.inputs and node.inputs[name]) end,
+		field = function(name) return node.fields and node.fields[name] end,
+	})
+end
+
+local function compileNode(node, indent)
+	local def = Defs.byId[node.type]
+	if not def or not def.toLua then
+		return string.rep("\t", indent) .. "-- unknown block"
+	end
+	return def.toLua(node, {
+		q = q,
+		pad = string.rep("\t", indent),
+		in_ = function(name) return compileValue(node.inputs and node.inputs[name]) end,
+		field = function(name) return node.fields and node.fields[name] end,
+		body = function(name)
+			local lines = {}
+			local body = node.bodies and node.bodies[name]
+			if body then
+				for _, child in body do
+					table.insert(lines, compileNode(child, indent + 1))
+				end
+			end
+			return table.concat(lines, "\n")
+		end,
+	})
+end
+
+local PREAMBLE = table.concat({
+	'local Players = game:GetService("Players")',
+	"local _vars = {}",
+	"local function _findPlayer(name)",
+	"\tfor _, p in Players:GetPlayers() do",
+	"\t\tif string.lower(p.Name) == string.lower(name) then return p end",
+	"\tend",
+	"\treturn nil",
+	"end",
+	"",
+}, "\n")
+
+function Lua.compile(program)
+	local lines = {}
+	for _, node in program do
+		table.insert(lines, compileNode(node, 0))
+	end
+	return PREAMBLE .. "\n" .. table.concat(lines, "\n")
+end
+
+return Lua
+end)()
+
+if SETTINGS then
+	SkidSS_Config.Limits.MaxSteps = SETTINGS.maxSteps or SkidSS_Config.Limits.MaxSteps
+	SkidSS_Config.Limits.MaxLoopIterations = SETTINGS.maxLoopIterations or SkidSS_Config.Limits.MaxLoopIterations
+	SkidSS_Config.Limits.MaxWaitSeconds = SETTINGS.maxWaitSeconds or SkidSS_Config.Limits.MaxWaitSeconds
+end
+
+-- ===== END SHARED MODULES =====
+
+if RunService:IsClient() then
+-- ===== CLIENT (runs in the cloned script inside PlayerGui) =====
+local SkidSS_Client_Theme = (function()
+-- UI construction helpers plus the live, mutable colour table the Interface
+-- blocks recolour at runtime.
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Config = SkidSS_Config
+
+local Theme = {}
+
+Theme.colors = {
+	accent = Config.UI.Accent,
+	background = Config.UI.Background,
+	panel = Config.UI.Panel,
+	panelAlt = Config.UI.PanelAlt,
+	text = Config.UI.Text,
+	subText = Config.UI.SubText,
+	good = Config.UI.Good,
+	bad = Config.UI.Bad,
+}
+
+function Theme.create(className, props, children)
+	local instance = Instance.new(className)
+	if props then
+		for key, value in props do
+			if key ~= "Parent" then
+				instance[key] = value
+			end
+		end
+	end
+	if children then
+		for _, child in children do
+			child.Parent = instance
+		end
+	end
+	if props and props.Parent then
+		instance.Parent = props.Parent
+	end
+	return instance
+end
+
+function Theme.corner(radius)
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, radius or 6)
+	return corner
+end
+
+function Theme.padding(amount)
+	local pad = Instance.new("UIPadding")
+	pad.PaddingLeft = UDim.new(0, amount)
+	pad.PaddingRight = UDim.new(0, amount)
+	pad.PaddingTop = UDim.new(0, amount)
+	pad.PaddingBottom = UDim.new(0, amount)
+	return pad
+end
+
+function Theme.listLayout(padding, direction)
+	local layout = Instance.new("UIListLayout")
+	layout.FillDirection = direction or Enum.FillDirection.Vertical
+	layout.SortOrder = Enum.SortOrder.LayoutOrder
+	layout.Padding = UDim.new(0, padding or 4)
+	return layout
+end
+
+return Theme
+end)()
+
+local SkidSS_Client_Palette = (function()
+-- The block picker. Lists every statement block allowed on this side, grouped by
+-- category; clicking one asks the canvas to insert it.
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Defs = SkidSS_BlocksDefs
+local Theme = SkidSS_Client_Theme
+
+local Palette = {}
+
+local function preview(label)
+	return (string.gsub(label or "", "%%(%S+)", "[%1]"))
+end
+
+function Palette.build(parent, allow, onPick)
+	Theme.listLayout(4).Parent = parent
+	local order = 0
+
+	for _, category in Defs.categoryOrder do
+		local defs = {}
+		for _, def in Defs.categories[category] do
+			if def.kind == "statement" and not def.hidden and allow[def.side] then
+				table.insert(defs, def)
+			end
+		end
+
+		if #defs > 0 then
+			order += 1
+			Theme.create("TextLabel", {
+				Size = UDim2.new(1, 0, 0, 18),
+				BackgroundTransparency = 1,
+				Text = category,
+				TextColor3 = Theme.colors.subText,
+				Font = Enum.Font.GothamBold,
+				TextSize = 12,
+				TextXAlignment = Enum.TextXAlignment.Left,
+				LayoutOrder = order,
+				Parent = parent,
+			})
+
+			for _, def in defs do
+				order += 1
+				local button = Theme.create("TextButton", {
+					Size = UDim2.new(1, 0, 0, 26),
+					BackgroundColor3 = Theme.colors.panelAlt,
+					Text = " " .. preview(def.label),
+					TextColor3 = Theme.colors.text,
+					Font = Enum.Font.Gotham,
+					TextSize = 12,
+					TextXAlignment = Enum.TextXAlignment.Left,
+					TextTruncate = Enum.TextTruncate.AtEnd,
+					LayoutOrder = order,
+					Parent = parent,
+				}, { Theme.corner(4) })
+				button.MouseButton1Click:Connect(function()
+					onPick(def.id)
+				end)
+			end
+		end
+	end
+end
+
+return Palette
+end)()
+
+local SkidSS_Client_BlockCanvas = (function()
+-- Renders a block program as a stack of editable rows. Control blocks nest their
+-- bodies inwards. A "selection" marks where the palette inserts the next block.
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Defs = SkidSS_BlocksDefs
+local Theme = SkidSS_Client_Theme
+
+local BlockCanvas = {}
+
+local CATEGORY_COLORS = {
+	Output = Color3.fromRGB(74, 110, 190),
+	Control = Color3.fromRGB(206, 146, 56),
+	Variables = Color3.fromRGB(196, 104, 66),
+	Operators = Color3.fromRGB(86, 166, 106),
+	Players = Color3.fromRGB(146, 96, 196),
+	Interface = Color3.fromRGB(66, 156, 166),
+	Values = Color3.fromRGB(108, 108, 128),
+}
+
+local function categoryColor(category)
+	return CATEGORY_COLORS[category] or Color3.fromRGB(90, 90, 110)
+end
+
+local function parseLabel(label)
+	local tokens = {}
+	for word in string.gmatch(label or "", "%S+") do
+		if string.sub(word, 1, 1) == "%" then
+			table.insert(tokens, { slot = string.sub(word, 2) })
+		else
+			table.insert(tokens, { text = word })
+		end
+	end
+	return tokens
+end
+
+local function fieldDef(def, name)
+	if def.fields then
+		for _, field in def.fields do
+			if field.name == name then
+				return field
+			end
+		end
+	end
+	return nil
+end
+
+local function textEditor(width, get, set)
+	local box = Theme.create("TextBox", {
+		Size = UDim2.fromOffset(width, 22),
+		BackgroundColor3 = Theme.colors.panelAlt,
+		TextColor3 = Theme.colors.text,
+		Font = Enum.Font.Code,
+		TextSize = 13,
+		Text = get(),
+		ClearTextOnFocus = false,
+	}, { Theme.corner(4) })
+	box.FocusLost:Connect(function()
+		set(box.Text)
+	end)
+	return box
+end
+
+local function slotEditor(node, def, name)
+	local input = node.inputs and node.inputs[name]
+	if input then
+		if input.type == "_literal" then
+			local fields = input.fields
+			if fields.vtype == "boolean" then
+				local toggle = Theme.create("TextButton", {
+					Size = UDim2.fromOffset(56, 22),
+					BackgroundColor3 = Theme.colors.panelAlt,
+					Text = tostring(fields.value),
+					TextColor3 = Theme.colors.text,
+					Font = Enum.Font.Code,
+					TextSize = 13,
+				}, { Theme.corner(4) })
+				toggle.MouseButton1Click:Connect(function()
+					fields.value = not (fields.value == true or fields.value == "true")
+					toggle.Text = tostring(fields.value)
+				end)
+				return toggle
+			end
+			local width = fields.vtype == "number" and 56 or 110
+			return textEditor(width, function() return tostring(fields.value) end, function(text) fields.value = text end)
+		end
+		return Theme.create("TextLabel", {
+			AutomaticSize = Enum.AutomaticSize.X,
+			Size = UDim2.fromOffset(0, 22),
+			BackgroundTransparency = 1,
+			Text = "(expr)",
+			TextColor3 = Theme.colors.subText,
+			Font = Enum.Font.Code,
+			TextSize = 13,
+		})
+	end
+
+	local field = fieldDef(def, name)
+	if field then
+		if field.kind == "choice" then
+			local button = Theme.create("TextButton", {
+				Size = UDim2.fromOffset(54, 22),
+				BackgroundColor3 = Theme.colors.panelAlt,
+				Text = tostring(node.fields[name]),
+				TextColor3 = Theme.colors.accent,
+				Font = Enum.Font.GothamBold,
+				TextSize = 13,
+			}, { Theme.corner(4) })
+			button.MouseButton1Click:Connect(function()
+				local index = table.find(field.choices, node.fields[name]) or 1
+				node.fields[name] = field.choices[(index % #field.choices) + 1]
+				button.Text = tostring(node.fields[name])
+			end)
+			return button
+		end
+		return textEditor(90, function() return tostring(node.fields[name]) end, function(text) node.fields[name] = text end)
+	end
+
+	return nil
+end
+
+function BlockCanvas.new(parent, program, allow)
+	local controller = {}
+	local selection = { list = program, index = #program }
+
+	Theme.listLayout(6).Parent = parent
+
+	local function selectButton(list, index, isAppend)
+		return selection.list == list and (isAppend and selection.index >= #list or selection.index == index)
+	end
+
+	local function insertButton(list)
+		local button = Theme.create("TextButton", {
+			Size = UDim2.new(1, 0, 0, 20),
+			BackgroundColor3 = Theme.colors.panel,
+			Text = "+ insert here",
+			TextColor3 = Theme.colors.subText,
+			Font = Enum.Font.Gotham,
+			TextSize = 12,
+		}, { Theme.corner(4) })
+		if selectButton(list, #list, true) then
+			local stroke = Instance.new("UIStroke")
+			stroke.Color = Theme.colors.accent
+			stroke.Parent = button
+		end
+		button.MouseButton1Click:Connect(function()
+			selection = { list = list, index = #list }
+			controller.refresh()
+		end)
+		return button
+	end
+
+	local function header(node, def, list, index)
+		local frame = Theme.create("TextButton", {
+			Size = UDim2.new(1, 0, 0, 30),
+			BackgroundColor3 = categoryColor(def.category),
+			Text = "",
+			AutoButtonColor = false,
+			BorderSizePixel = 0,
+		}, { Theme.corner(6) })
+
+		if selectButton(list, index, false) then
+			local stroke = Instance.new("UIStroke")
+			stroke.Color = Theme.colors.text
+			stroke.Thickness = 2
+			stroke.Parent = frame
+		end
+		frame.MouseButton1Click:Connect(function()
+			selection = { list = list, index = index }
+			controller.refresh()
+		end)
+
+		local left = Theme.create("Frame", {
+			Size = UDim2.new(1, -104, 1, 0),
+			BackgroundTransparency = 1,
+			ClipsDescendants = true,
+			Parent = frame,
+		}, { Theme.padding(6) })
+		local row = Theme.listLayout(6, Enum.FillDirection.Horizontal)
+		row.VerticalAlignment = Enum.VerticalAlignment.Center
+		row.Parent = left
+
+		local order = 0
+		for _, token in parseLabel(def.label) do
+			order += 1
+			local element
+			if token.slot then
+				element = slotEditor(node, def, token.slot)
+			end
+			if not element then
+				element = Theme.create("TextLabel", {
+					AutomaticSize = Enum.AutomaticSize.X,
+					Size = UDim2.fromOffset(0, 22),
+					BackgroundTransparency = 1,
+					Text = token.text or token.slot or "",
+					TextColor3 = Theme.colors.text,
+					Font = Enum.Font.GothamMedium,
+					TextSize = 13,
+				})
+			end
+			element.LayoutOrder = order
+			element.Parent = left
+		end
+
+		local controls = Theme.create("Frame", {
+			Size = UDim2.fromOffset(96, 30),
+			Position = UDim2.new(1, -96, 0, 0),
+			BackgroundTransparency = 1,
+			Parent = frame,
+		})
+		local controlsRow = Theme.listLayout(4, Enum.FillDirection.Horizontal)
+		controlsRow.HorizontalAlignment = Enum.HorizontalAlignment.Right
+		controlsRow.VerticalAlignment = Enum.VerticalAlignment.Center
+		controlsRow.Parent = controls
+
+		local function control(symbol, onClick)
+			local button = Theme.create("TextButton", {
+				Size = UDim2.fromOffset(26, 22),
+				BackgroundColor3 = Theme.colors.panelAlt,
+				Text = symbol,
+				TextColor3 = Theme.colors.text,
+				Font = Enum.Font.GothamBold,
+				TextSize = 13,
+				Parent = controls,
+			}, { Theme.corner(4) })
+			button.MouseButton1Click:Connect(onClick)
+		end
+
+		control("\u{2191}", function()
+			if index > 1 then
+				list[index], list[index - 1] = list[index - 1], list[index]
+				controller.refresh()
+			end
+		end)
+		control("\u{2193}", function()
+			if index < #list then
+				list[index], list[index + 1] = list[index + 1], list[index]
+				controller.refresh()
+			end
+		end)
+		control("\u{2715}", function()
+			table.remove(list, index)
+			selection = { list = program, index = #program }
+			controller.refresh()
+		end)
+
+		return frame
+	end
+
+	local function renderBlock(node, list, index, parent)
+		local def = Defs.byId[node.type]
+		if not def then return end
+
+		local container = Theme.create("Frame", {
+			Size = UDim2.new(1, 0, 0, 0),
+			AutomaticSize = Enum.AutomaticSize.Y,
+			BackgroundTransparency = 1,
+			LayoutOrder = index,
+			Parent = parent,
+		})
+		Theme.listLayout(4).Parent = container
+
+		local head = header(node, def, list, index)
+		head.LayoutOrder = 0
+		head.Parent = container
+
+		if def.bodies then
+			local bodyOrder = 0
+			for _, bodyName in def.bodies do
+				bodyOrder += 1
+				local bodyBox = Theme.create("Frame", {
+					Size = UDim2.new(1, 0, 0, 0),
+					AutomaticSize = Enum.AutomaticSize.Y,
+					BackgroundColor3 = Theme.colors.background,
+					BorderSizePixel = 0,
+					LayoutOrder = bodyOrder,
+					Parent = container,
+				}, { Theme.corner(6) })
+				local pad = Instance.new("UIPadding")
+				pad.PaddingLeft = UDim.new(0, 16)
+				pad.PaddingTop = UDim.new(0, 4)
+				pad.PaddingBottom = UDim.new(0, 4)
+				pad.PaddingRight = UDim.new(0, 4)
+				pad.Parent = bodyBox
+				Theme.listLayout(4).Parent = bodyBox
+
+				local caption = Theme.create("TextLabel", {
+					Size = UDim2.new(1, 0, 0, 16),
+					BackgroundTransparency = 1,
+					Text = bodyName,
+					TextColor3 = Theme.colors.subText,
+					Font = Enum.Font.Gotham,
+					TextSize = 12,
+					TextXAlignment = Enum.TextXAlignment.Left,
+					LayoutOrder = 0,
+					Parent = bodyBox,
+				})
+
+				local body = node.bodies[bodyName]
+				for childIndex, child in body do
+					renderBlock(child, body, childIndex, bodyBox)
+				end
+
+				local add = insertButton(body)
+				add.LayoutOrder = 1e6
+				add.Parent = bodyBox
+			end
+		end
+	end
+
+	function controller.refresh()
+		for _, child in parent:GetChildren() do
+			if child:IsA("GuiObject") then
+				child:Destroy()
+			end
+		end
+		for index, node in program do
+			renderBlock(node, program, index, parent)
+		end
+		local tail = insertButton(program)
+		tail.LayoutOrder = 1e6
+		tail.Parent = parent
+	end
+
+	function controller.insert(defId)
+		local list = selection.list or program
+		local at = (selection.index or #list) + 1
+		table.insert(list, at, Defs.instantiate(defId))
+		selection = { list = list, index = at }
+		controller.refresh()
+	end
+
+	controller.refresh()
+	return controller
+end
+
+return BlockCanvas
+end)()
+
+local SkidSS_Client_BlockTab = (function()
+-- A block-editing tab: palette on the left, canvas on the right, plus Run and
+-- View Lua. Reused for both the server "Blocks" tab and the client "Interface" tab.
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Lua = SkidSS_BlocksLua
+local Theme = SkidSS_Client_Theme
+local Palette = SkidSS_Client_Palette
+local BlockCanvas = SkidSS_Client_BlockCanvas
+
+local BlockTab = {}
+
+function BlockTab.build(parent, ctx, opts)
+	local program = {}
+
+	local frame = Theme.create("Frame", {
+		Name = opts.name,
+		Size = UDim2.fromScale(1, 1),
+		BackgroundTransparency = 1,
+		Visible = false,
+		Parent = parent,
+	})
+
+	local paletteFrame = Theme.create("ScrollingFrame", {
+		Size = UDim2.new(0, 184, 1, -44),
+		BackgroundColor3 = Theme.colors.panel,
+		BorderSizePixel = 0,
+		ScrollBarThickness = 4,
+		CanvasSize = UDim2.new(),
+		AutomaticCanvasSize = Enum.AutomaticSize.Y,
+		Parent = frame,
+	}, { Theme.corner(8), Theme.padding(6) })
+
+	local canvasFrame = Theme.create("ScrollingFrame", {
+		Size = UDim2.new(1, -192, 1, -44),
+		Position = UDim2.fromOffset(192, 0),
+		BackgroundColor3 = Theme.colors.panel,
+		BorderSizePixel = 0,
+		ScrollBarThickness = 6,
+		CanvasSize = UDim2.new(),
+		AutomaticCanvasSize = Enum.AutomaticSize.Y,
+		Parent = frame,
+	}, { Theme.corner(8), Theme.padding(8) })
+
+	local canvas = BlockCanvas.new(canvasFrame, program, opts.allow)
+	Palette.build(paletteFrame, opts.allow, function(defId)
+		canvas.insert(defId)
+	end)
+
+	local run = Theme.create("TextButton", {
+		Size = UDim2.fromOffset(140, 32),
+		Position = UDim2.new(1, -140, 1, -34),
+		BackgroundColor3 = Theme.colors.accent,
+		Text = opts.runText or "Run",
+		TextColor3 = Theme.colors.text,
+		Font = Enum.Font.GothamMedium,
+		TextSize = 14,
+		Parent = frame,
+	}, { Theme.corner(8) })
+	run.MouseButton1Click:Connect(function()
+		opts.onRun(program)
+	end)
+
+	local view = Theme.create("TextButton", {
+		Size = UDim2.fromOffset(110, 32),
+		Position = UDim2.new(1, -260, 1, -34),
+		BackgroundColor3 = Theme.colors.panelAlt,
+		Text = "View Lua",
+		TextColor3 = Theme.colors.text,
+		Font = Enum.Font.GothamMedium,
+		TextSize = 14,
+		Parent = frame,
+	}, { Theme.corner(8) })
+	view.MouseButton1Click:Connect(function()
+		for line in string.gmatch(Lua.compile(program), "[^\n]+") do
+			ctx.log(line)
+		end
+	end)
+
+	return { frame = frame, program = program }
+end
+
+return BlockTab
+end)()
+
+local SkidSS_Client_CodeTab = (function()
+-- Raw Luau editor. Sends its text to the server to run with loadstring.
+
+local Theme = SkidSS_Client_Theme
+
+local CodeTab = {}
+
+local SAMPLE = 'print("hello from the server")\n\nfor _, p in game:GetService("Players"):GetPlayers() do\n\tprint(p.Name)\nend'
+
+function CodeTab.build(parent, ctx)
+	local frame = Theme.create("Frame", {
+		Name = "CodeTab",
+		Size = UDim2.fromScale(1, 1),
+		BackgroundTransparency = 1,
+		Visible = false,
+		Parent = parent,
+	})
+
+	local holder = Theme.create("Frame", {
+		Size = UDim2.new(1, 0, 1, -44),
+		BackgroundColor3 = Theme.colors.panel,
+		BorderSizePixel = 0,
+		Parent = frame,
+	}, { Theme.corner(8), Theme.padding(8) })
+
+	local box = Theme.create("TextBox", {
+		Name = "Source",
+		Size = UDim2.fromScale(1, 1),
+		BackgroundTransparency = 1,
+		TextColor3 = Theme.colors.text,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextYAlignment = Enum.TextYAlignment.Top,
+		Font = Enum.Font.Code,
+		TextSize = 15,
+		MultiLine = true,
+		ClearTextOnFocus = false,
+		TextWrapped = false,
+		Text = SAMPLE,
+		Parent = holder,
+	})
+
+	local run = Theme.create("TextButton", {
+		Size = UDim2.fromOffset(140, 32),
+		Position = UDim2.new(1, -140, 1, -34),
+		BackgroundColor3 = Theme.colors.accent,
+		Text = "Run on server",
+		TextColor3 = Theme.colors.text,
+		Font = Enum.Font.GothamMedium,
+		TextSize = 14,
+		Parent = frame,
+	}, { Theme.corner(8) })
+
+	run.MouseButton1Click:Connect(function()
+		ctx.log("> running lua\u{2026}")
+		ctx.execute({ mode = "lua", source = box.Text })
+	end)
+
+	return { frame = frame }
+end
+
+return CodeTab
+end)()
+
+local SkidSS_Client_Window = (function()
+-- The executor window: title bar, tabs (Code / Blocks / Interface), output console
+-- and quick-button bar. Window.mount(cfg) applies a config table (from Studio's
+-- CustomInterface) before building, so colours / title / tabs / buttons are baked
+-- in. Also exposes the api the in-game Interface tab uses to restyle it live.
+
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Config = SkidSS_Config
+local Net = SkidSS_Net
+local Interpreter = SkidSS_BlocksInterpreter
+
+local Theme = SkidSS_Client_Theme
+local CodeTab = SkidSS_Client_CodeTab
+local BlockTab = SkidSS_Client_BlockTab
+
+local Window = {}
+
+local function normalizeAsset(value)
+	value = tostring(value or "")
+	if value == "" then return "" end
+	if string.match(value, "^%d+$") then return "rbxassetid://" .. value end
+	return value
+end
+
+-- Builds one designer element (panel / label / button / image / codebox) from a
+-- spec. Positions and sizes are scales (0..1) so the layout is screen-responsive.
+-- env = { codeBoxes = {}, fireAction = fn(name), runCode = fn(source) }.
+local function buildElement(el, parent, env)
+	local class = el.type == "image" and "ImageLabel"
+		or el.type == "button" and "TextButton"
+		or el.type == "label" and "TextLabel"
+		or el.type == "codebox" and "TextBox"
+		or el.type == "output" and "ScrollingFrame"
+		or "Frame"
+
+	local inst = Instance.new(class)
+	inst.Position = UDim2.fromScale(tonumber(el.x) or 0, tonumber(el.y) or 0)
+	inst.Size = UDim2.fromScale(tonumber(el.w) or 0.1, tonumber(el.h) or 0.1)
+	inst.BorderSizePixel = 0
+	inst.BackgroundColor3 = typeof(el.bg) == "Color3" and el.bg or Color3.fromRGB(28, 28, 36)
+	inst.BackgroundTransparency = tonumber(el.bgTransparency) or (class == "ImageLabel" and 1 or 0)
+
+	if tonumber(el.corner) and tonumber(el.corner) > 0 then
+		local corner = Instance.new("UICorner")
+		corner.CornerRadius = UDim.new(0, tonumber(el.corner))
+		corner.Parent = inst
+	end
+
+	if tonumber(el.borderThickness) and tonumber(el.borderThickness) > 0 then
+		local stroke = Instance.new("UIStroke")
+		stroke.Thickness = tonumber(el.borderThickness)
+		stroke.Color = typeof(el.borderColor) == "Color3" and el.borderColor or Color3.fromRGB(255, 255, 255)
+		stroke.Parent = inst
+	end
+
+	if class == "ImageLabel" then
+		inst.Image = normalizeAsset(el.image)
+		if typeof(el.imageColor) == "Color3" then inst.ImageColor3 = el.imageColor end
+	end
+
+	if class == "TextLabel" or class == "TextButton" or class == "TextBox" then
+		inst.Text = tostring(el.text or "")
+		inst.TextColor3 = typeof(el.textColor) == "Color3" and el.textColor or Color3.fromRGB(255, 255, 255)
+		inst.TextSize = tonumber(el.textSize) or 16
+		inst.Font = class == "TextBox" and Enum.Font.Code or Enum.Font.GothamMedium
+	end
+
+	if class == "TextBox" then
+		inst.ClearTextOnFocus = false
+		inst.MultiLine = true
+		inst.TextWrapped = true
+		inst.TextXAlignment = Enum.TextXAlignment.Left
+		inst.TextYAlignment = Enum.TextYAlignment.Top
+		if env and env.codeBoxes then
+			env.codeBoxes[el.name or "main"] = inst
+		end
+	end
+
+	if class == "ScrollingFrame" then
+		inst.ScrollBarThickness = 4
+		inst.CanvasSize = UDim2.new()
+		inst.AutomaticCanvasSize = Enum.AutomaticSize.Y
+		local layout = Instance.new("UIListLayout")
+		layout.SortOrder = Enum.SortOrder.LayoutOrder
+		layout.Padding = UDim.new(0, 2)
+		layout.Parent = inst
+		local pad = Instance.new("UIPadding")
+		pad.PaddingLeft = UDim.new(0, 6)
+		pad.PaddingTop = UDim.new(0, 4)
+		pad.PaddingRight = UDim.new(0, 6)
+		pad.PaddingBottom = UDim.new(0, 4)
+		pad.Parent = inst
+		local outColor = typeof(el.textColor) == "Color3" and el.textColor or Color3.fromRGB(212, 212, 226)
+		local outSize = tonumber(el.textSize) or 13
+		local order = 0
+		local function append(line)
+			order += 1
+			local lbl = Instance.new("TextLabel")
+			lbl.Size = UDim2.new(1, 0, 0, 0)
+			lbl.AutomaticSize = Enum.AutomaticSize.Y
+			lbl.BackgroundTransparency = 1
+			lbl.Text = tostring(line)
+			lbl.TextColor3 = outColor
+			lbl.Font = Enum.Font.Code
+			lbl.TextSize = outSize
+			lbl.TextXAlignment = Enum.TextXAlignment.Left
+			lbl.TextWrapped = true
+			lbl.LayoutOrder = order
+			lbl.Parent = inst
+			task.defer(function()
+				inst.CanvasPosition = Vector2.new(0, inst.AbsoluteCanvasSize.Y)
+			end)
+		end
+		if env and env.outputs then
+			table.insert(env.outputs, append)
+		end
+	end
+
+	if class == "TextButton" then
+		inst.AutoButtonColor = true
+		if el.action and env and env.fireAction then
+			inst.MouseButton1Click:Connect(function() env.fireAction(el.action) end)
+		elseif el.execute and env then
+			inst.MouseButton1Click:Connect(function()
+				local box = env.codeBoxes and env.codeBoxes[el.execute]
+				if box then env.runCode(box.Text) end
+			end)
+		end
+	end
+
+	-- A draggable element moves the whole HUD group (e.g. a background panel
+	-- acting as a window you drag by its margins).
+	if el.draggable then
+		inst.Active = true
+		local dragging, dragStart, startPositions
+		inst.InputBegan:Connect(function(input)
+			if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+				dragging = true
+				dragStart = input.Position
+				startPositions = {}
+				if env and env.elementInsts then
+					for _, other in env.elementInsts do
+						startPositions[other] = other.Position
+					end
+				end
+				input.Changed:Connect(function()
+					if input.UserInputState == Enum.UserInputState.End then dragging = false end
+				end)
+			end
+		end)
+		UserInputService.InputChanged:Connect(function(input)
+			if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+				local delta = input.Position - dragStart
+				local cam = workspace.CurrentCamera
+				local vp = cam and cam.ViewportSize or Vector2.new(1920, 1080)
+				local dx, dy = delta.X / vp.X, delta.Y / vp.Y
+				for other, startPos in startPositions do
+					other.Position = UDim2.new(startPos.X.Scale + dx, startPos.X.Offset, startPos.Y.Scale + dy, startPos.Y.Offset)
+				end
+			end
+		end)
+	end
+
+	inst.Parent = parent
+	return inst
+end
+
+function Window.mount(cfg)
+	cfg = cfg or {}
+
+	-- Apply the theme overrides into the shared colour table before anything is
+	-- built, so every instance (including the tabs) picks them up.
+	if typeof(cfg.accent) == "Color3" then Theme.colors.accent = cfg.accent end
+	if typeof(cfg.background) == "Color3" then Theme.colors.background = cfg.background end
+	if typeof(cfg.panel) == "Color3" then Theme.colors.panel = cfg.panel end
+	if typeof(cfg.panelAlt) == "Color3" then Theme.colors.panelAlt = cfg.panelAlt end
+	if typeof(cfg.text) == "Color3" then Theme.colors.text = cfg.text end
+
+	local toggleKey = Config.UI.ToggleKey
+	if type(cfg.toggleKey) == "string" then
+		local ok, key = pcall(function() return Enum.KeyCode[cfg.toggleKey] end)
+		if ok and key then toggleKey = key end
+	end
+
+	local player = Players.LocalPlayer
+	local playerGui = player:WaitForChild("PlayerGui")
+	-- De-dupe: never build a second copy of the UI.
+	if playerGui:FindFirstChild("SkidSS") then return end
+
+	local executeRemote = Net.get(Net.Execute)
+	local outputRemote = Net.get(Net.Output)
+
+	local gui = Instance.new("ScreenGui")
+	gui.Name = "SkidSS"
+	gui.ResetOnSpawn = false
+	gui.IgnoreGuiInset = true
+	gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+	gui.Parent = playerGui
+
+	local winW = math.max(420, tonumber(cfg.width) or 760)
+	local winH = math.max(300, tonumber(cfg.height) or 480)
+	-- The built-in executor window is hidden on join by default (toggle key opens
+	-- it), so a custom HUD isn't competing with a second window on screen.
+	local openOnJoin = cfg.openOnJoin == true
+	local root = Theme.create("Frame", {
+		Size = UDim2.fromOffset(winW, winH),
+		Position = UDim2.new(0.5, -winW / 2, 0.5, -winH / 2),
+		AnchorPoint = Vector2.new(0, 0),
+		BackgroundColor3 = Theme.colors.background,
+		BorderSizePixel = 0,
+		Active = true,
+		Visible = openOnJoin,
+		Parent = gui,
+	}, { Theme.corner(10) })
+
+	-- Header / drag bar
+	local headerBar = Theme.create("Frame", {
+		Size = UDim2.new(1, 0, 0, 40),
+		BackgroundColor3 = Theme.colors.panel,
+		BorderSizePixel = 0,
+		Active = true,
+		Parent = root,
+	}, { Theme.corner(10) })
+
+	local accentStrip = Theme.create("Frame", {
+		Size = UDim2.new(1, 0, 0, 3),
+		Position = UDim2.new(0, 0, 1, -3),
+		BackgroundColor3 = Theme.colors.accent,
+		BorderSizePixel = 0,
+		Parent = headerBar,
+	})
+
+	local title = Theme.create("TextLabel", {
+		Size = UDim2.new(1, -120, 1, 0),
+		Position = UDim2.fromOffset(14, 0),
+		BackgroundTransparency = 1,
+		Text = type(cfg.title) == "string" and cfg.title or "SkidSS",
+		TextColor3 = Theme.colors.text,
+		Font = Enum.Font.GothamBold,
+		TextSize = 16,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Parent = headerBar,
+	})
+
+	Theme.create("TextLabel", {
+		Size = UDim2.fromOffset(60, 40),
+		Position = UDim2.new(1, -100, 0, 0),
+		BackgroundTransparency = 1,
+		Text = "v" .. Config.Version,
+		TextColor3 = Theme.colors.subText,
+		Font = Enum.Font.Gotham,
+		TextSize = 12,
+		TextXAlignment = Enum.TextXAlignment.Right,
+		Parent = headerBar,
+	})
+
+	local hide = Theme.create("TextButton", {
+		Size = UDim2.fromOffset(30, 24),
+		Position = UDim2.new(1, -36, 0, 8),
+		BackgroundColor3 = Theme.colors.panelAlt,
+		Text = "\u{2013}",
+		TextColor3 = Theme.colors.text,
+		Font = Enum.Font.GothamBold,
+		TextSize = 16,
+		Parent = headerBar,
+	}, { Theme.corner(6) })
+
+	-- Content + bottom regions
+	local content = Theme.create("Frame", {
+		Position = UDim2.fromOffset(12, 84),
+		Size = UDim2.new(1, -24, 1, -252),
+		BackgroundTransparency = 1,
+		ClipsDescendants = true,
+		Parent = root,
+	})
+
+	local console = Theme.create("ScrollingFrame", {
+		Position = UDim2.new(0, 12, 1, -160),
+		Size = UDim2.new(1, -24, 0, 110),
+		BackgroundColor3 = Theme.colors.panel,
+		BorderSizePixel = 0,
+		ScrollBarThickness = 5,
+		CanvasSize = UDim2.new(),
+		AutomaticCanvasSize = Enum.AutomaticSize.Y,
+		Parent = root,
+	}, { Theme.corner(8), Theme.padding(8) })
+	local consoleLayout = Theme.listLayout(2)
+	consoleLayout.Parent = console
+
+	local quickBar = Theme.create("Frame", {
+		Position = UDim2.new(0, 12, 1, -42),
+		Size = UDim2.new(1, -24, 0, 30),
+		BackgroundTransparency = 1,
+		Parent = root,
+	})
+	local quickRow = Theme.listLayout(6, Enum.FillDirection.Horizontal)
+	quickRow.Parent = quickBar
+
+	-- UI api used by the live console and by Interface blocks ------------------
+	local lineOrder = 0
+	local quickButtons = {}
+	local hudOutputs = {} -- append functions for any Output elements on the HUD
+	local api = {}
+
+	function api.log(text)
+		for _, append in hudOutputs do
+			append(tostring(text))
+		end
+		lineOrder += 1
+		local label = Theme.create("TextLabel", {
+			Size = UDim2.new(1, 0, 0, 0),
+			AutomaticSize = Enum.AutomaticSize.Y,
+			BackgroundTransparency = 1,
+			Text = tostring(text),
+			TextColor3 = Theme.colors.text,
+			Font = Enum.Font.Code,
+			TextSize = 13,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			TextWrapped = true,
+			LayoutOrder = lineOrder,
+			Parent = console,
+		})
+		task.defer(function()
+			console.CanvasPosition = Vector2.new(0, console.AbsoluteCanvasSize.Y)
+		end)
+		return label
+	end
+
+	function api.setTitle(text)
+		title.Text = text
+	end
+
+	function api.setAccent(color)
+		Theme.colors.accent = color
+		accentStrip.BackgroundColor3 = color
+		for _, button in quickButtons do
+			button.BackgroundColor3 = color
+		end
+	end
+
+	function api.setBackground(color)
+		Theme.colors.background = color
+		root.BackgroundColor3 = color
+	end
+
+	function api.notify(text)
+		local toast = Theme.create("TextLabel", {
+			Size = UDim2.fromOffset(260, 34),
+			Position = UDim2.new(0.5, -130, 0, 50),
+			BackgroundColor3 = Theme.colors.panelAlt,
+			Text = tostring(text),
+			TextColor3 = Theme.colors.text,
+			Font = Enum.Font.GothamMedium,
+			TextSize = 14,
+			Parent = gui,
+		}, { Theme.corner(8) })
+		task.delay(2.5, function()
+			toast:Destroy()
+		end)
+	end
+
+	-- ctx shared with the tabs
+	local state = { serverProgram = nil }
+	local ctx = {
+		log = api.log,
+		execute = function(payload)
+			executeRemote:FireServer(payload)
+		end,
+		state = state,
+		window = api,
+	}
+
+	-- addButton(label[, onClick]). Without onClick it re-runs the saved block
+	-- program; with one it does whatever the caller wants (e.g. fire an action).
+	function api.addButton(label, onClick)
+		local button = Theme.create("TextButton", {
+			Size = UDim2.fromOffset(110, 30),
+			BackgroundColor3 = Theme.colors.accent,
+			Text = label,
+			TextColor3 = Theme.colors.text,
+			Font = Enum.Font.GothamMedium,
+			TextSize = 13,
+			Parent = quickBar,
+		}, { Theme.corner(6) })
+		table.insert(quickButtons, button)
+		button.MouseButton1Click:Connect(function()
+			if onClick then
+				onClick()
+			elseif state.serverProgram then
+				ctx.execute({ mode = "blocks", program = state.serverProgram })
+				api.log("> running blocks\u{2026}")
+			end
+		end)
+	end
+
+	-- The executor has a single Code tab.
+	local code = CodeTab.build(content, ctx)
+	code.frame.Visible = true
+
+	-- Buttons baked in by Studio fire named runtime actions.
+	if type(cfg.buttons) == "table" then
+		for _, button in cfg.buttons do
+			if type(button) == "table" and type(button.label) == "string" then
+				local action = button.action
+				local args = button.args
+				if action then
+					api.addButton(button.label, function()
+						ctx.execute({ mode = "action", name = action, args = args })
+						api.log("> " .. button.label)
+					end)
+				else
+					api.addButton(button.label)
+				end
+			end
+		end
+	end
+
+	local tabBar = Theme.create("Frame", {
+		Position = UDim2.fromOffset(12, 48),
+		Size = UDim2.new(1, -24, 0, 30),
+		BackgroundTransparency = 1,
+		Parent = root,
+	})
+	local tabRow = Theme.listLayout(6, Enum.FillDirection.Horizontal)
+	tabRow.Parent = tabBar
+
+	Theme.create("TextButton", {
+		Size = UDim2.fromOffset(110, 30),
+		BackgroundColor3 = Theme.colors.accent,
+		Text = "Code",
+		TextColor3 = Theme.colors.text,
+		Font = Enum.Font.GothamMedium,
+		TextSize = 13,
+		Parent = tabBar,
+	}, { Theme.corner(6) })
+
+	-- Custom designer elements (always-visible HUD, sibling to the window)
+	if type(cfg.elements) == "table" then
+		local elementInsts = {}
+		local env = {
+			codeBoxes = {},
+			outputs = hudOutputs,
+			elementInsts = elementInsts,
+			fireAction = function(action)
+				ctx.execute({ mode = "action", name = action })
+				api.log("> " .. tostring(action))
+			end,
+			runCode = function(source)
+				ctx.execute({ mode = "lua", source = source })
+			end,
+		}
+		for _, el in cfg.elements do
+			if type(el) == "table" then
+				table.insert(elementInsts, buildElement(el, gui, env))
+			end
+		end
+	end
+
+	-- Output from the server
+	outputRemote.OnClientEvent:Connect(function(text)
+		api.log(text)
+	end)
+	api.log("SkidSS ready. " .. toggleKey.Name .. " toggles this window.")
+	-- If nothing else is on screen (no custom HUD), tell the player how to open it.
+	if not openOnJoin and (type(cfg.elements) ~= "table" or #cfg.elements == 0) then
+		api.notify("Press " .. toggleKey.Name .. " to open SkidSS")
+	end
+
+	-- Hide / toggle
+	hide.MouseButton1Click:Connect(function()
+		root.Visible = false
+	end)
+	-- Toggle works even while a TextBox is focused (the key isn't a typing key).
+	UserInputService.InputBegan:Connect(function(input)
+		if input.KeyCode == toggleKey then
+			root.Visible = not root.Visible
+		end
+	end)
+
+	-- Dragging
+	local dragging, dragStart, startPos
+	headerBar.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = true
+			dragStart = input.Position
+			startPos = root.Position
+			input.Changed:Connect(function()
+				if input.UserInputState == Enum.UserInputState.End then
+					dragging = false
+				end
+			end)
+		end
+	end)
+	UserInputService.InputChanged:Connect(function(input)
+		if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+			local delta = input.Position - dragStart
+			root.Position = UDim2.new(
+				startPos.X.Scale, startPos.X.Offset + delta.X,
+				startPos.Y.Scale, startPos.Y.Offset + delta.Y
+			)
+		end
+	end)
+
+	-- Resize grip (bottom-right corner). The window's regions are anchored
+	-- relative to root, so changing root size reflows everything.
+	local grip = Theme.create("TextButton", {
+		Size = UDim2.fromOffset(18, 18),
+		Position = UDim2.new(1, -22, 1, -22),
+		BackgroundColor3 = Theme.colors.panelAlt,
+		Text = "\u{2921}",
+		TextColor3 = Theme.colors.subText,
+		Font = Enum.Font.GothamBold,
+		TextSize = 14,
+		Active = true,
+		Parent = root,
+	}, { Theme.corner(4) })
+
+	local resizing, resizeStart, resizeStartSize
+	grip.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			resizing = true
+			resizeStart = input.Position
+			resizeStartSize = root.AbsoluteSize
+			input.Changed:Connect(function()
+				if input.UserInputState == Enum.UserInputState.End then
+					resizing = false
+				end
+			end)
+		end
+	end)
+	UserInputService.InputChanged:Connect(function(input)
+		if resizing and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+			local delta = input.Position - resizeStart
+			root.Size = UDim2.fromOffset(
+				math.max(420, resizeStartSize.X + delta.X),
+				math.max(300, resizeStartSize.Y + delta.Y)
+			)
+		end
+	end)
+
+	return api
+end
+
+return Window
+end)()
+
+-- Client entry point. Asks the server whether this player is whitelisted and
+-- only then builds the executor window.
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Net = SkidSS_Net
+
+
+local allowed = Net.get(Net.RequestAccess):InvokeServer()
+if not allowed then
+	return
+end
+
+local cfg = {}
+local ok, result = pcall(CustomInterface)
+if ok and type(result) == "table" then
+	cfg = result
+end
+
+local Window = SkidSS_Client_Window
+Window.mount(cfg)
+
+-- ===== END CLIENT =====
+	return
+end
+
+-- ===== SERVER (do not edit) =====
+local SkidSS_ServerApi = (function()
+-- The surface that server-run block programs are allowed to touch. emit() sends a
+-- console line back to the player who ran the script.
+
+local Players = game:GetService("Players")
+
+local ServerApi = {}
+
+function ServerApi.new(emit)
+	local api = {}
+
+	function api.print(text)
+		emit(text)
+		print("[SkidSS] " .. text)
+	end
+
+	function api.warn(text)
+		emit("[warn] " .. text)
+		warn("[SkidSS] " .. text)
+	end
+
+	function api.players()
+		return Players:GetPlayers()
+	end
+
+	function api.findPlayer(name)
+		name = string.lower(tostring(name))
+		for _, player in Players:GetPlayers() do
+			if string.lower(player.Name) == name then
+				return player
+			end
+		end
+		return nil
+	end
+
+	function api.kick(player, reason)
+		player:Kick(reason)
+	end
+
+	local function humanoidOf(player)
+		local character = player.Character
+		return character and character:FindFirstChildOfClass("Humanoid")
+	end
+
+	function api.setWalkSpeed(player, value)
+		local humanoid = humanoidOf(player)
+		if humanoid then humanoid.WalkSpeed = value end
+	end
+
+	function api.setHealth(player, value)
+		local humanoid = humanoidOf(player)
+		if humanoid then humanoid.Health = value end
+	end
+
+	function api.teleport(player, dest)
+		local character = player.Character
+		local destCharacter = dest.Character
+		if character and destCharacter then
+			character:PivotTo(destCharacter:GetPivot())
+		end
+	end
+
+	return api
+end
+
+return ServerApi
+end)()
+
+local SkidSS_Whitelist = (function()
+-- Who is allowed to open and use the executor. This module lives in
+-- ServerScriptService, which never replicates to clients, so the list stays private.
+-- UserIds are the safe choice (names can be changed); names are lower-cased.
+
+local Whitelist = {}
+
+Whitelist.UserIds = WHITELIST_USERIDS
+Whitelist.Names = WHITELIST_NAMES
+
+function Whitelist.isAllowed(player)
+	if Whitelist.UserIds[player.UserId] then
+		return true
+	end
+	if Whitelist.Names[string.lower(player.Name)] then
+		return true
+	end
+	return false
+end
+
+return Whitelist
+end)()
+
+local SkidSS_Executor = (function()
+-- Runs a request: either raw Luau (loadstring) or a block program (interpreter).
+-- Block programs are always safe to run; raw Luau needs the game owner to enable
+-- ServerScriptService.LoadStringEnabled.
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Config = SkidSS_Config
+local Interpreter = SkidSS_BlocksInterpreter
+local ServerApi = SkidSS_ServerApi
+
+local Executor = {}
+
+local SERVER_ALLOW = { server = true, both = true }
+
+local function collect(...)
+	local parts = {}
+	for i = 1, select("#", ...) do
+		parts[i] = tostring(select(i, ...))
+	end
+	return table.concat(parts, " ")
+end
+
+local function runLua(source, emit)
+	local sandbox = setmetatable({
+		print = function(...) emit(collect(...)) end,
+		warn = function(...) emit("[warn] " .. collect(...)) end,
+	}, { __index = getfenv() })
+
+	local ok, fn, compileError = pcall(loadstring, source)
+	if not ok then
+		return false, "loadstring is disabled — enable ServerScriptService.LoadStringEnabled, or use blocks"
+	end
+	if not fn then
+		local message = tostring(compileError)
+		if string.find(message, "not available") or string.find(message, "disabled") then
+			return false, "loadstring is disabled — enable ServerScriptService.LoadStringEnabled, or use blocks"
+		end
+		return false, "compile error: " .. message
+	end
+
+	setfenv(fn, sandbox)
+	local ran, runtimeError = pcall(fn)
+	if not ran then
+		return false, "runtime error: " .. tostring(runtimeError)
+	end
+	return true, "ran"
+end
+
+function Executor.run(player, payload, emit, runtime)
+	if type(payload) ~= "table" then
+		return false, "no payload"
+	end
+	if payload.mode == "lua" then
+		if type(payload.source) ~= "string" then
+			return false, "no source"
+		end
+		return runLua(payload.source, emit)
+	elseif payload.mode == "blocks" then
+		if type(payload.program) ~= "table" then
+			return false, "no program"
+		end
+		local ok, err = pcall(Interpreter.run, payload.program, ServerApi.new(emit), Config, SERVER_ALLOW)
+		if not ok then
+			return false, "block error: " .. tostring(err)
+		end
+		return true, "ran"
+	elseif payload.mode == "action" then
+		local actions = runtime and runtime.customActions or {}
+		local action = actions[payload.name]
+		if type(action) ~= "function" then
+			return false, "unknown action: " .. tostring(payload.name)
+		end
+		local ok, err = pcall(action, player, payload.args, emit)
+		if not ok then
+			return false, "action error: " .. tostring(err)
+		end
+		return true, "ran"
+	end
+	return false, "unknown mode"
+end
+
+return Executor
+end)()
+
+-- Server entry point: builds the remotes, gates every request behind the
+-- whitelist, and hands valid requests to the executor on a fresh thread.
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+-- De-dupe: if another SkidSS install already set up the remotes, this is a
+-- duplicate copy (e.g. the model was imported twice) — stop so only one runs.
+if ReplicatedStorage:FindFirstChild("SkidSS_Net") then
+	return
+end
+
+local Net = SkidSS_Net
+
+local Whitelist = SkidSS_Whitelist
+local Executor = SkidSS_Executor
+
+-- Customization slots. The bundler strips these markers and injects the user's
+-- Studio output in their place before shipping. Rojo dev mode keeps the defaults
+-- and loads the client from StarterPlayerScripts.
+
+local folder = Net.build()
+local requestAccess = folder:FindFirstChild(Net.RequestAccess)
+local execute = folder:FindFirstChild(Net.Execute)
+local output = folder:FindFirstChild(Net.Output)
+
+requestAccess.OnServerInvoke = function(player)
+	return Whitelist.isAllowed(player)
+end
+
+local lastRun = {}
+
+local function injectClient(player)
+	local playerGui = player:WaitForChild("PlayerGui", 10)
+	if not playerGui or playerGui:FindFirstChild("SkidSSClient") then return end
+	-- Preferred: clone the pre-baked LocalScript child shipped in the .rbxmx.
+	local template = script:FindFirstChild("Client")
+	if template then
+		local clone = template:Clone()
+		clone.Name = "SkidSSClient"
+		clone.Disabled = false
+		clone.Parent = playerGui
+		return
+	end
+	-- Fallback: self-clone with a RunContext flip. Works on engines that honor
+	-- runtime RunContext changes; silently no-ops on the ones that don't.
+	local clone = script:Clone()
+	clone.Name = "SkidSSClient"
+	clone.Disabled = true
+	pcall(function() clone.RunContext = Enum.RunContext.Client end)
+	clone.Parent = playerGui
+	clone.Disabled = false
+end
+
+execute.OnServerEvent:Connect(function(player, payload)
+	if not Whitelist.isAllowed(player) or type(payload) ~= "table" then
+		return
+	end
+
+	local now = os.clock()
+	if lastRun[player] and now - lastRun[player] < 0.25 then
+		return
+	end
+	lastRun[player] = now
+
+	local allowed = true
+	local hookOk, hookRet = pcall(CustomRuntime.onRequestReceived, player, payload)
+	if hookOk then allowed = hookRet ~= false end
+	if not allowed then
+		output:FireClient(player, "\u{2717} rejected by custom runtime")
+		return
+	end
+
+	local function emit(text)
+		output:FireClient(player, tostring(text))
+	end
+
+	task.spawn(function()
+		local ok, message = Executor.run(player, payload, emit, CustomRuntime)
+		emit((ok and "\u{2713} " or "\u{2717} ") .. tostring(message))
+	end)
+end)
+
+local function onJoin(player)
+	if Whitelist.isAllowed(player) then
+		injectClient(player)
+	end
+	pcall(CustomRuntime.onPlayerAdded, player)
+end
+
+Players.PlayerAdded:Connect(function(player)
+	task.spawn(onJoin, player)
+end)
+
+for _, player in Players:GetPlayers() do
+	task.spawn(onJoin, player)
+end
+
+Players.PlayerRemoving:Connect(function(player)
+	lastRun[player] = nil
+	pcall(CustomRuntime.onPlayerRemoving, player)
+end)
+
+-- ===== END SERVER =====
