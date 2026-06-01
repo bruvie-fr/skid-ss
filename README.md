@@ -6,9 +6,7 @@ where they can run code on the server — by writing Luau directly, or by snappi
 blocks together. They can re-skin the executor itself with blocks, and customize
 the server-side runtime with blocks too.
 
-> Install this only in games you own (or where the owner has explicitly
-> authorised you to add server scripts). It runs code on the server, so treat
-> the whitelist as the key to your game.
+
 
 ## Three parts
 
