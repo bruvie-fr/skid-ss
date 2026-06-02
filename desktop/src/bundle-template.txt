@@ -1315,7 +1315,6 @@ local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
-local Shared = ReplicatedStorage:WaitForChild("SkidSS")
 local Config = SkidSS_Config
 local Net = SkidSS_Net
 local Interpreter = SkidSS_BlocksInterpreter
@@ -1882,9 +1881,7 @@ return Window
 end)()
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local Shared = ReplicatedStorage:WaitForChild("SkidSS")
 local Net = SkidSS_Net
-
 
 
 local allowed = Net.get(Net.RequestAccess):InvokeServer()
@@ -3336,7 +3333,6 @@ end)()
 
 local SkidSS_Executor = (function()
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local Shared = ReplicatedStorage:WaitForChild("SkidSS")
 local Config = SkidSS_Config
 local Interpreter = SkidSS_BlocksInterpreter
 local ServerApi = SkidSS_ServerApi
@@ -3394,7 +3390,6 @@ if ReplicatedStorage:FindFirstChild("SkidSS_Net") then
 	return
 end
 
-local Shared = ReplicatedStorage:WaitForChild("SkidSS")
 local Net = SkidSS_Net
 
 local Whitelist = SkidSS_Whitelist
@@ -3436,7 +3431,6 @@ local function postWebhook(player, payload)
 		pcall(function() HttpService:PostAsync(WEBHOOK_URL, HttpService:JSONEncode(body)) end)
 	end)
 end
-
 
 
 local folder = Net.build()
