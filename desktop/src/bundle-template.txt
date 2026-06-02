@@ -3320,7 +3320,7 @@ function Whitelist.refresh()
 end
 
 function Whitelist.refreshIfStale()
-	if os.clock() - lastFetch > CACHE_SECONDS then fetch() end
+	if lastFetch == 0 or os.clock() - lastFetch > CACHE_SECONDS then fetch() end
 end
 
 function Whitelist.isAllowed(player)
