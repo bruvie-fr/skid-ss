@@ -1,5 +1,3 @@
--- Compiles a block program to readable Luau for the "View Lua" panel and export.
-
 local Defs = require(script.Parent.Defs)
 
 local Lua = {}

@@ -1,6 +1,3 @@
--- A block-editing tab: palette on the left, canvas on the right, plus Run and
--- View Lua. Reused for both the server "Blocks" tab and the client "Interface" tab.
-
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Lua = require(ReplicatedStorage:WaitForChild("SkidSS").blocks.Lua)
 local Theme = require(script.Parent.Parent.Theme)

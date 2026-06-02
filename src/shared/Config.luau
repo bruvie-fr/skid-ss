@@ -1,15 +1,16 @@
--- Shared, replicated settings. Clients can read this, so keep no secrets here.
-
 local Config = {}
 
 Config.Version = "0.1.0"
 Config.NetFolder = "SkidSS_Net"
 
--- Server-enforced limits for block scripts so they can never hang the game.
 Config.Limits = {
 	MaxSteps = 200000,
 	MaxLoopIterations = 100000,
 	MaxWaitSeconds = 30,
+
+	MaxLuaSteps = 10000000,
+	MaxLuaSeconds = 2,
+	MaxLuaDepth = 200,
 }
 
 Config.UI = {

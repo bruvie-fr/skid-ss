@@ -193,7 +193,6 @@ main { flex: 1 1 auto; display: flex; min-height: 0; }
 .checkrow { display: flex; align-items: center; gap: 8px; color: #c9c9d6; font-size: 13px; margin-top: 12px; cursor: pointer; }
 .checkrow input { width: 16px; height: 16px; accent-color: #7c5cff; }
 
-/* selects + textareas reuse the input look */
 .row select, .row input, .grid select {
   flex: 1;
   background: #1b1b22;
@@ -240,7 +239,6 @@ main { flex: 1 1 auto; display: flex; min-height: 0; }
 }
 .lua-area:focus { outline: none; border-color: #7c5cff; }
 
-/* GUI builder */
 .builder { position: absolute; inset: 0; display: flex; flex-direction: column; }
 .builder-toolbar {
   flex: 0 0 auto;
@@ -335,3 +333,25 @@ main { flex: 1 1 auto; display: flex; min-height: 0; }
   color: #d4d4e2;
   white-space: pre;
 }
+
+.acct { display: flex; align-items: center; gap: 8px; }
+.acct-name { color: #c9c9d6; font-size: 13px; font-weight: 600; }
+.modal {
+  position: fixed; inset: 0; z-index: 1000;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex; align-items: center; justify-content: center;
+}
+.modal-card {
+  width: 340px; background: #20202a; border: 1px solid #2c2c38;
+  border-radius: 12px; padding: 22px; box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+}
+.modal-card h2 { margin: 0 0 8px 0; font-size: 18px; }
+.modal-card input {
+  width: 100%; box-sizing: border-box; margin-top: 10px;
+  background: #1b1b22; border: 1px solid #2c2c38; color: #e6e6f0;
+  padding: 10px 12px; border-radius: 8px; font-size: 14px;
+}
+.modal-card input:focus { outline: none; border-color: #7c5cff; }
+.modal-actions { display: flex; gap: 8px; margin-top: 16px; }
+.modal-actions .btn { flex: 1; }
+#wlUrl { background: #1b1b22; padding: 2px 6px; border-radius: 4px; word-break: break-all; }

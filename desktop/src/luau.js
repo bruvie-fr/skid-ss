@@ -1,6 +1,3 @@
-// Luau code generators for the custom Roblox / UI blocks. Standard blocks are
-// already covered by Blockly's bundled Lua generator (Lua is valid Luau here).
-
 (function () {
   const G = Blockly.Lua;
   const NONE = G.ORDER_NONE;

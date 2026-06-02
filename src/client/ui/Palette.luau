@@ -1,6 +1,3 @@
--- The block picker. Lists every statement block allowed on this side, grouped by
--- category; clicking one asks the canvas to insert it.
-
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Defs = require(ReplicatedStorage:WaitForChild("SkidSS").blocks.Defs)
 local Theme = require(script.Parent.Parent.Theme)

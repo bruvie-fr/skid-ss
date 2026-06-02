@@ -1,6 +1,3 @@
-// SkidSS Studio controller. Script tab = Blockly; Interface / Runtime / Config
-// are forms. Interface + Runtime + Config bake into the single-script bundle.
-
 (function () {
   let scriptWs = null;
   let activeTab = "script";
@@ -10,6 +7,12 @@
     userIds: [],
     names: [],
     settings: { maxSteps: 200000, maxLoopIterations: 100000, maxWaitSeconds: 30 },
+    serverBase: "",
+    webhookUrl: "",
+    whitelistUrl: "",
+    discordWebhook: "",
+    webhookUsername: "",
+    webhookTemplate: "",
   };
 
   const interfaceState = {
@@ -20,31 +23,40 @@
     openOnJoin: false,
     accent: "#7c5cff",
     background: "#16161c",
+    backgroundTransparency: 1,
     panel: "#20202a",
     text: "#ececf6",
-    buttons: [], // legacy quick-bar buttons (unused; elements replace them)
-    elements: [], // { id, type, x, y, w, h, bg, bgTransparency, corner, text, textColor, textSize, image, imageColor, action }
+    buttons: [],
+    elements: [],
   };
 
-  const runtimeState = {
-    actions: [], // { name, mode:"verb"|"lua", verb, target, param, targetName, lua }
-    join: [], // { verb, param }
-    leave: [],
-    gateLua: false,
-  };
-
-  // Pure codegen lives in codegen.js so it can be unit-tested under Node.
   const CG = window.SkidCodegen;
-  const VERBS = CG.VERBS;
-  const ACTION_VERB_IDS = CG.ACTION_VERB_IDS;
-  const HOOK_VERB_IDS = CG.HOOK_VERB_IDS;
   const escapeHtml = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
   const buildConfigSection = (s) => CG.buildConfigSection(s);
   const parseConfigSection = (t) => CG.parseConfigSection(t);
   const buildInterfaceConfig = () => CG.buildInterfaceConfig(interfaceState);
-  const buildRuntimeTable = () => CG.buildRuntimeTable(runtimeState);
 
-  // === Blockly (Script tab only) ===========================================
+  const RUNTIME_DEFAULT = [
+    "local CustomRuntime = {",
+    "\tonPlayerAdded = function(_player) end,",
+    "\tonPlayerRemoving = function(_player) end,",
+    "\tonRequestReceived = function(_player, _payload) return true end,",
+    "\tcustomActions = {},",
+    "}",
+  ].join("\n");
+  function buildRuntimeSection() {
+    const code = generate(scriptWs);
+    return code && code.trim() ? RUNTIME_DEFAULT + "\n\n" + code : RUNTIME_DEFAULT;
+  }
+
+  function blockActionNames() {
+    if (!scriptWs || !scriptWs.getBlocksByType) return [];
+    try {
+      return scriptWs.getBlocksByType("runtime_register_action", false)
+        .map((b) => (b.getFieldValue("NAME") || "").trim())
+        .filter((n) => n);
+    } catch (e) { return []; }
+  }
 
   function makeTheme() {
     try {
@@ -82,8 +94,6 @@
     catch (e) { return "-- generation error: " + e; }
   }
 
-  // === Bundle assembly =====================================================
-
   const M_CONFIG_START = "-- ===== CONFIG (edit me, or use Studio to fill these in) =====";
   const M_CONFIG_END = "-- ===== END CONFIG =====";
   const M_RUNTIME_START = "-- ===== CUSTOM RUNTIME (written by Studio; safe to overwrite) =====";
@@ -100,12 +110,10 @@
 
   function assembleBundle(template) {
     let out = replaceSection(template, M_CONFIG_START, M_CONFIG_END, buildConfigSection(configState));
-    out = replaceSection(out, M_RUNTIME_START, M_RUNTIME_END, buildRuntimeTable());
+    out = replaceSection(out, M_RUNTIME_START, M_RUNTIME_END, buildRuntimeSection());
     out = replaceSection(out, M_INTERFACE_START, M_INTERFACE_END, "local CustomInterface = " + buildInterfaceConfig());
     return out;
   }
-
-  // === Status ==============================================================
 
   function setStatus(text) {
     const el = document.getElementById("status");
@@ -115,9 +123,8 @@
 
   function updateCode() {
     let code = "";
-    if (activeTab === "script") code = generate(scriptWs);
+    if (activeTab === "script") code = buildRuntimeSection();
     else if (activeTab === "interface") code = "local CustomInterface = " + buildInterfaceConfig();
-    else if (activeTab === "runtime") code = buildRuntimeTable();
     else if (activeTab === "config") code = buildConfigSection(configState);
     document.getElementById("codeOut").textContent = code && code.trim() ? code : "-- nothing yet";
   }
@@ -127,18 +134,14 @@
     document.querySelectorAll(".tab").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
     document.getElementById("scriptWorkspace").classList.toggle("hidden", tab !== "script");
     document.getElementById("interfacePane").classList.toggle("hidden", tab !== "interface");
-    document.getElementById("runtimePane").classList.toggle("hidden", tab !== "runtime");
     document.getElementById("configPane").classList.toggle("hidden", tab !== "config");
     document.getElementById("ifSide").classList.toggle("hidden", tab !== "interface");
 
     if (tab === "script") Blockly.svgResize(scriptWs);
     else if (tab === "interface") renderInterfaceForm();
-    else if (tab === "runtime") renderRuntimeForm();
     else if (tab === "config") renderConfigForm();
     updateCode();
   }
-
-  // === Config form =========================================================
 
   function renderRow(container, value, onLive, onDelete, placeholder) {
     const row = document.createElement("div");
@@ -177,6 +180,7 @@
     document.getElementById("cfgMaxSteps").value = configState.settings.maxSteps;
     document.getElementById("cfgMaxLoopIterations").value = configState.settings.maxLoopIterations;
     document.getElementById("cfgMaxWaitSeconds").value = configState.settings.maxWaitSeconds;
+    updatePageInfo();
   }
 
   function wireConfigForm() {
@@ -188,34 +192,45 @@
     document.getElementById("loadConfigBtn").addEventListener("click", loadConfigFromFile);
   }
 
-  async function loadConfigFromFile() {
-    const T = window.__TAURI__;
-    if (!(T && T.core && T.dialog && T.dialog.open)) { setStatus("File dialog only works in the Tauri app"); return; }
-    try {
-      const file = await T.dialog.open({ title: "Pick existing SkidSS.lua", filters: [{ name: "Lua script", extensions: ["lua"] }] });
-      if (!file) return;
-      const text = await T.core.invoke("read_text", { path: file });
-      const parsed = parseConfigSection(text);
-      if (!parsed) { setStatus("No CONFIG block found in that file"); return; }
-      configState.userIds = parsed.userIds; configState.names = parsed.names;
-      Object.assign(configState.settings, parsed.settings);
-      renderConfigForm(); updateCode(); setStatus("Loaded CONFIG from " + file);
-    } catch (e) { setStatus("Load failed: " + e); }
+  function applyLoadedConfig(text, sourceName) {
+    const parsed = parseConfigSection(text);
+    if (!parsed) { setStatus("No CONFIG block found in that file"); return; }
+    configState.userIds = parsed.userIds; configState.names = parsed.names;
+    Object.assign(configState.settings, parsed.settings);
+    if (parsed.whitelistUrl) configState.whitelistUrl = parsed.whitelistUrl;
+    if (parsed.webhookUrl) configState.webhookUrl = parsed.webhookUrl;
+    renderConfigForm(); updateCode(); setStatus("Loaded CONFIG from " + sourceName);
   }
 
-  // === Interface GUI builder ==============================================
+  async function loadConfigFromFile() {
+    const T = window.__TAURI__;
+    if (T && T.core && T.dialog && T.dialog.open) {
+
+      try {
+        const file = await T.dialog.open({ title: "Pick existing SkidSS.lua", filters: [{ name: "Lua script", extensions: ["lua"] }] });
+        if (!file) return;
+        const text = await T.core.invoke("read_text", { path: file });
+        applyLoadedConfig(text, file);
+      } catch (e) { setStatus("Load failed: " + e); }
+      return;
+    }
+
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = ".lua,.txt";
+    input.addEventListener("change", () => {
+      const file = input.files && input.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = () => applyLoadedConfig(String(reader.result || ""), file.name);
+      reader.onerror = () => setStatus("Load failed: " + reader.error);
+      reader.readAsText(file);
+    });
+    input.click();
+  }
 
   let selectedId = null;
   let elIdCounter = 0;
-
-  function actionOptions(selected) {
-    const opts = ['<option value="">(no action)</option>'];
-    runtimeState.actions.forEach((a) => {
-      const name = (a.name || "").trim();
-      if (name) opts.push('<option value="' + escapeHtml(name) + '"' + (name === selected ? " selected" : "") + ">" + escapeHtml(name) + "</option>");
-    });
-    return opts.join("");
-  }
 
   function hexToRgba(hex, transparency) {
     hex = hex || "#000000";
@@ -223,6 +238,17 @@
     const g = parseInt(hex.slice(3, 5), 16) || 0;
     const b = parseInt(hex.slice(5, 7), 16) || 0;
     return "rgba(" + r + "," + g + "," + b + "," + (1 - (Number(transparency) || 0)) + ")";
+  }
+
+  function imagePreviewUrl(v) {
+    v = String(v == null ? "" : v).trim();
+    if (!v) return "";
+    let id = null;
+    if (/^\d+$/.test(v)) id = v;
+    else { const m = v.match(/^rbxassetid:\/\/(\d+)$/i); if (m) id = m[1]; }
+    if (id) return "https://www.roblox.com/asset-thumbnail/image?assetId=" + id + "&width=420&height=420&format=png";
+    if (/^https?:\/\//i.test(v)) return v;
+    return "";
   }
 
   function defaultElement(type) {
@@ -237,11 +263,9 @@
     return Object.assign(base, { bg: "#202028", bgTransparency: 0 });
   }
 
-  // One-click working executor: a sized code box + output + an Execute button
-  // already wired to the code box.
   function addExecutorPreset() {
     const mk = (type, props) => { elIdCounter += 1; return Object.assign({ id: "e" + elIdCounter, type, corner: 6 }, props); };
-    // Background panel (added first = behind), draggable so it moves the group.
+
     const bg = mk("panel", { x: 0.02, y: 0.05, w: 0.56, h: 0.66, bg: "#16161c", bgTransparency: 0.04, corner: 10, borderColor: "#2c2c38", borderThickness: 1, draggable: true });
     const title = mk("label", { text: "Executor — drag here", x: 0.04, y: 0.07, w: 0.5, h: 0.04, bg: "#000000", bgTransparency: 1, textColor: "#8a8a9a", textSize: 14, corner: 0 });
     const cb = mk("codebox", { name: "main", x: 0.04, y: 0.13, w: 0.52, h: 0.3, bg: "#15151b", bgTransparency: 0, textColor: "#d4d4e2", textSize: 14, text: 'print("hello")' });
@@ -263,8 +287,6 @@
     return interfaceState.elements.find((e) => e.id === selectedId) || null;
   }
 
-  // Updates a text span (not div.textContent) so resize handles, which are
-  // also children of the div, survive re-positioning.
   function positionDiv(div, e) {
     div.style.left = (e.x * 100) + "%";
     div.style.top = (e.y * 100) + "%";
@@ -290,8 +312,27 @@
       span.style.color = e.textColor || "#9fe0b0";
       span.style.fontSize = Math.max(8, Math.round((e.textSize || 13) * 0.72)) + "px";
     } else if (e.type === "image") {
-      span.textContent = e.image ? "IMG " + e.image : "image";
-      span.style.color = ""; span.style.fontSize = "";
+
+      div.style.backgroundImage = "";
+      const url = imagePreviewUrl(e.image);
+      const placeholder = e.image ? "🖼 #" + e.image : "🖼 image";
+      let img = div.querySelector("img.el-img");
+      if (!url) {
+        if (img) img.remove();
+        span.textContent = placeholder;
+      } else {
+        if (!img) {
+          img = document.createElement("img");
+          img.className = "el-img";
+          img.style.cssText = "position:absolute;inset:0;width:100%;height:100%;object-fit:contain;pointer-events:none;";
+          div.insertBefore(img, div.firstChild);
+        }
+        img.onload = function () { span.textContent = ""; };
+        img.onerror = function () { if (img && img.parentNode) img.parentNode.removeChild(img); span.textContent = placeholder; };
+        if (img.getAttribute("src") !== url) img.src = url;
+        span.textContent = (img.complete && img.naturalWidth) ? "" : placeholder;
+      }
+      span.style.color = "#9a9aa8"; span.style.fontSize = "11px";
     } else {
       span.textContent = "";
     }
@@ -300,7 +341,7 @@
   function renderCanvas() {
     const canvas = document.getElementById("ifCanvas");
     if (!canvas) return;
-    canvas.style.background = interfaceState.background || "#16161c";
+    canvas.style.background = hexToRgba(interfaceState.background || "#16161c", interfaceState.backgroundTransparency || 0);
     canvas.innerHTML = "";
     interfaceState.elements.forEach((e) => {
       const div = document.createElement("div");
@@ -405,12 +446,9 @@
 
   function buttonTargetOptions(e) {
     const opts = ['<option value="">(no action)</option>'];
-    runtimeState.actions.forEach((a) => {
-      const name = (a.name || "").trim();
-      if (name) {
-        const v = "action:" + name;
-        opts.push('<option value="' + escapeHtml(v) + '"' + (e.action === name ? " selected" : "") + ">Action: " + escapeHtml(name) + "</option>");
-      }
+    blockActionNames().forEach((name) => {
+      const v = "action:" + name;
+      opts.push('<option value="' + escapeHtml(v) + '"' + (e.action === name ? " selected" : "") + ">Action: " + escapeHtml(name) + "</option>");
     });
     interfaceState.elements.filter((x) => x.type === "codebox").forEach((cb) => {
       const name = cb.name || "main";
@@ -430,6 +468,8 @@
     const setVal = (key) => (v) => { e[key] = v; renderCanvas(); updateCode(); };
 
     const grid = document.createElement("div"); grid.className = "prop-grid";
+    grid.appendChild(propRow("X (0-1)", numInput(e.x, 0.01, 0, 1, setNum("x", 0))));
+    grid.appendChild(propRow("Y (0-1)", numInput(e.y, 0.01, 0, 1, setNum("y", 0))));
     grid.appendChild(propRow("W (0-1)", numInput(e.w, 0.01, 0.02, 1, setNum("w", 0.1))));
     grid.appendChild(propRow("H (0-1)", numInput(e.h, 0.01, 0.02, 1, setNum("h", 0.1))));
     grid.appendChild(propRow("Corner", numInput(e.corner || 0, 1, 0, 64, setNum("corner", 0))));
@@ -481,6 +521,22 @@
       box.appendChild(propRow("On click", sel));
     }
 
+    const layer = document.createElement("div"); layer.className = "prop-grid";
+    const idxOf = () => interfaceState.elements.findIndex((x) => x.id === e.id);
+    const mkLayer = (label, fn) => {
+      const b = document.createElement("button"); b.className = "btn small"; b.textContent = label;
+      b.addEventListener("click", fn); return b;
+    };
+    layer.appendChild(mkLayer("Send to back", () => {
+      const i = idxOf();
+      if (i > 0) { const [it] = interfaceState.elements.splice(i, 1); interfaceState.elements.unshift(it); renderCanvas(); renderProps(); updateCode(); }
+    }));
+    layer.appendChild(mkLayer("Bring to front", () => {
+      const i = idxOf();
+      if (i !== -1 && i < interfaceState.elements.length - 1) { const [it] = interfaceState.elements.splice(i, 1); interfaceState.elements.push(it); renderCanvas(); renderProps(); updateCode(); }
+    }));
+    box.appendChild(layer);
+
     const del = document.createElement("button");
     del.className = "btn small del-el"; del.textContent = "Delete element";
     del.addEventListener("click", () => {
@@ -499,6 +555,7 @@
     document.getElementById("ifOpenOnJoin").checked = !!s.openOnJoin;
     document.getElementById("ifAccent").value = s.accent;
     document.getElementById("ifBackground").value = s.background;
+    document.getElementById("ifBackgroundTransparency").value = s.backgroundTransparency;
     document.getElementById("ifPanel").value = s.panel;
     document.getElementById("ifText").value = s.text;
     renderCanvas();
@@ -519,126 +576,15 @@
     bind("ifWidth", "width"); bind("ifHeight", "height");
     bind("ifOpenOnJoin", "openOnJoin", true);
     bind("ifAccent", "accent"); bind("ifBackground", "background"); bind("ifPanel", "panel"); bind("ifText", "text");
+    const bt = document.getElementById("ifBackgroundTransparency");
+    if (bt) bt.addEventListener("input", () => {
+      interfaceState.backgroundTransparency = Math.max(0, Math.min(1, Number(bt.value) || 0));
+      renderCanvas(); updateCode();
+    });
     document.querySelectorAll("[data-add]").forEach((b) => b.addEventListener("click", () => addElement(b.dataset.add)));
     const preset = document.querySelector('[data-preset="executor"]');
     if (preset) preset.addEventListener("click", addExecutorPreset);
   }
-
-  // === Runtime form ========================================================
-
-  function verbOptions(ids, selected) {
-    return ids.map((id) => '<option value="' + id + '"' + (id === selected ? " selected" : "") + ">" + escapeHtml(VERBS[id].label) + "</option>").join("");
-  }
-
-  function buildActionRow(a, idx) {
-    const wrap = document.createElement("div"); wrap.className = "action-row";
-    const head = document.createElement("div"); head.className = "row";
-    const name = document.createElement("input");
-    name.type = "text"; name.placeholder = "action name (e.g. freeze)"; name.value = a.name || "";
-    name.addEventListener("input", () => { a.name = name.value; updateCode(); });
-    const mode = document.createElement("select");
-    mode.innerHTML = '<option value="verb">Do a verb</option><option value="lua">Custom Lua</option>';
-    mode.value = a.mode || "verb";
-    mode.addEventListener("change", () => { a.mode = mode.value; renderActionRows(); updateCode(); });
-    const del = document.createElement("button"); del.className = "del"; del.textContent = "×";
-    del.addEventListener("click", () => { runtimeState.actions.splice(idx, 1); renderActionRows(); updateCode(); });
-    head.appendChild(name); head.appendChild(mode); head.appendChild(del);
-    wrap.appendChild(head);
-
-    if ((a.mode || "verb") === "lua") {
-      const ta = document.createElement("textarea");
-      ta.className = "lua-area";
-      ta.placeholder = "-- player, args, emit in scope\nif emit then emit(\"hi\") end";
-      ta.value = a.lua || "";
-      ta.addEventListener("input", () => { a.lua = ta.value; updateCode(); });
-      wrap.appendChild(ta);
-    } else {
-      const sub = document.createElement("div"); sub.className = "row sub";
-      const id = a.verb || "notify";
-      const meta = VERBS[id];
-      const verb = document.createElement("select");
-      verb.innerHTML = verbOptions(ACTION_VERB_IDS, id);
-      verb.addEventListener("change", () => { a.verb = verb.value; renderActionRows(); updateCode(); });
-      sub.appendChild(verb);
-      if (!meta.noTarget) {
-        const target = document.createElement("select");
-        target.innerHTML = '<option value="self">Triggering player</option><option value="all">All players</option><option value="name">By name</option>';
-        target.value = a.target || "self";
-        target.addEventListener("change", () => { a.target = target.value; renderActionRows(); updateCode(); });
-        sub.appendChild(target);
-      }
-      if (meta.param) {
-        const param = document.createElement("input");
-        param.type = meta.param === "number" ? "number" : "text";
-        param.placeholder = meta.param; param.value = a.param != null ? a.param : "";
-        param.addEventListener("input", () => { a.param = param.value; updateCode(); });
-        sub.appendChild(param);
-      }
-      if (!meta.noTarget && (a.target || "self") === "name") {
-        const tn = document.createElement("input");
-        tn.type = "text"; tn.placeholder = "player name"; tn.value = a.targetName || "";
-        tn.addEventListener("input", () => { a.targetName = tn.value; updateCode(); });
-        sub.appendChild(tn);
-      }
-      wrap.appendChild(sub);
-    }
-    return wrap;
-  }
-
-  function renderActionRows() {
-    const box = document.getElementById("actionRows");
-    box.innerHTML = "";
-    if (runtimeState.actions.length === 0) { box.innerHTML = '<div class="empty">No actions yet. Click + add (e.g. a "freeze" action).</div>'; return; }
-    runtimeState.actions.forEach((a, idx) => box.appendChild(buildActionRow(a, idx)));
-  }
-
-  function renderHookRows(listKey, containerId) {
-    const box = document.getElementById(containerId);
-    box.innerHTML = "";
-    const list = runtimeState[listKey];
-    if (list.length === 0) { box.innerHTML = '<div class="empty">Nothing yet.</div>'; return; }
-    list.forEach((r, idx) => {
-      const row = document.createElement("div"); row.className = "row sub";
-      const id = r.verb || "heal";
-      const meta = VERBS[id];
-      const verb = document.createElement("select");
-      verb.innerHTML = verbOptions(HOOK_VERB_IDS, id);
-      verb.addEventListener("change", () => { r.verb = verb.value; renderHookRows(listKey, containerId); updateCode(); });
-      row.appendChild(verb);
-      if (meta.param) {
-        const param = document.createElement("input");
-        param.type = meta.param === "number" ? "number" : "text";
-        param.placeholder = meta.param; param.value = r.param != null ? r.param : "";
-        param.addEventListener("input", () => { r.param = param.value; updateCode(); });
-        row.appendChild(param);
-      }
-      const del = document.createElement("button"); del.className = "del"; del.textContent = "×";
-      del.addEventListener("click", () => { list.splice(idx, 1); renderHookRows(listKey, containerId); updateCode(); });
-      row.appendChild(del);
-      box.appendChild(row);
-    });
-  }
-
-  function renderRuntimeForm() {
-    renderActionRows();
-    renderHookRows("join", "joinRows");
-    renderHookRows("leave", "leaveRows");
-    document.getElementById("rtGateLua").checked = !!runtimeState.gateLua;
-  }
-
-  function wireRuntimeForm() {
-    document.getElementById("addActionBtn").addEventListener("click", () => {
-      runtimeState.actions.push({ name: "", mode: "verb", verb: "freeze", target: "self", param: "" });
-      renderActionRows(); updateCode();
-      const rows = document.querySelectorAll("#actionRows .action-row");
-      if (rows.length) rows[rows.length - 1].querySelector("input").focus();
-    });
-    document.getElementById("addJoinBtn").addEventListener("click", () => { runtimeState.join.push({ verb: "heal", param: "" }); renderHookRows("join", "joinRows"); updateCode(); });
-    document.getElementById("addLeaveBtn").addEventListener("click", () => { runtimeState.leave.push({ verb: "freeze", param: "" }); renderHookRows("leave", "leaveRows"); updateCode(); });
-    document.getElementById("rtGateLua").addEventListener("change", (e) => { runtimeState.gateLua = e.target.checked; updateCode(); });
-  }
-
-  // === Build / copy ========================================================
 
   function download(name, contents) {
     const blob = new Blob([contents], { type: "text/plain" });
@@ -648,7 +594,12 @@
   }
 
   async function buildScript() {
-    if (!bundleTemplate) { setStatus("Bundle template not loaded yet"); return; }
+    if (!bundleTemplate) { setStatus("Bundle template not loaded — serve over HTTP (node tools/serve-web.js), not file://"); return; }
+    if (!window.SkidAuth || !SkidAuth.isLoggedIn()) { openAuth(); setStatus("Log in first — your page provides the live whitelist + webhook"); return; }
+    if (!/^https:\/\/(discord(app)?\.com)\/api\/webhooks\//i.test(configState.discordWebhook || "")) {
+      switchTab("config"); setStatus("A Discord webhook URL is required (Config → Discord webhook)"); return;
+    }
+    try { await SkidAuth.putProject(currentProject()); } catch (e) { setStatus("Save failed: " + e.message); return; }
     const bundle = assembleBundle(bundleTemplate);
     const classEl = document.getElementById("buildClass");
     const className = (classEl && classEl.value) || "Script";
@@ -668,7 +619,7 @@
   }
 
   async function copyBundle() {
-    if (!bundleTemplate) { setStatus("Bundle template not loaded yet"); return; }
+    if (!bundleTemplate) { setStatus("Bundle template not loaded — serve over HTTP (node tools/serve-web.js), not file://"); return; }
     const bundle = assembleBundle(bundleTemplate);
     try { await navigator.clipboard.writeText(bundle); setStatus("Copied SkidSS.lua to clipboard (" + bundle.length + " chars)"); }
     catch (e) { setStatus("Copy failed: " + e); }
@@ -685,6 +636,122 @@
     catch (e) {}
   }
 
+  function currentProject() {
+    let blocks = {};
+    try { blocks = Blockly.serialization.workspaces.save(scriptWs); } catch (e) {}
+    return {
+      blocks,
+      interface: interfaceState,
+      settings: configState.settings,
+      whitelist: {
+        userIds: configState.userIds.map((s) => parseInt(String(s).trim(), 10)).filter((n) => Number.isFinite(n) && n > 0),
+        names: configState.names.map((s) => String(s).trim().toLowerCase()).filter((s) => s.length > 0),
+      },
+      discordWebhook: configState.discordWebhook || "",
+      webhookUsername: configState.webhookUsername || "",
+      webhookTemplate: configState.webhookTemplate || "",
+    };
+  }
+
+  function loadProject(p) {
+    p = p || {};
+    if (p.blocks && scriptWs) { try { Blockly.serialization.workspaces.load(p.blocks, scriptWs); } catch (e) {} }
+    if (p.interface && typeof p.interface === "object") Object.assign(interfaceState, p.interface);
+    if (p.whitelist) {
+      configState.userIds = (p.whitelist.userIds || []).map(String);
+      configState.names = (p.whitelist.names || []).map(String);
+    }
+    if (p.settings && typeof p.settings === "object") Object.assign(configState.settings, p.settings);
+    configState.discordWebhook = p.discordWebhook || "";
+    configState.webhookUsername = p.webhookUsername || "";
+    configState.webhookTemplate = p.webhookTemplate || "";
+    if (activeTab === "interface") renderInterfaceForm();
+    else if (activeTab === "config") renderConfigForm();
+    updateCode();
+  }
+
+  function apiBase() {
+    return (configState.serverBase || window.location.origin || "").replace(/\/+$/, "");
+  }
+
+  function updatePageInfo() {
+    const pk = document.getElementById("cfgPageKey");
+    const sb = document.getElementById("cfgServerBase");
+    const wl = document.getElementById("wlUrl");
+    const wh = document.getElementById("cfgWebhook");
+    const key = window.SkidAuth && SkidAuth.state.pageKey;
+    if (key) {
+      configState.whitelistUrl = apiBase() + "/api/whitelist/" + key;
+      configState.webhookUrl = apiBase() + "/api/webhook/" + key;
+    }
+    if (pk) pk.value = key || "";
+    if (sb && document.activeElement !== sb) sb.value = configState.serverBase || "";
+    if (wh && document.activeElement !== wh) wh.value = configState.discordWebhook || "";
+    const whn = document.getElementById("cfgWebhookName");
+    const wht = document.getElementById("cfgWebhookTemplate");
+    if (whn && document.activeElement !== whn) whn.value = configState.webhookUsername || "";
+    if (wht && document.activeElement !== wht) wht.value = configState.webhookTemplate || "";
+    if (wl) wl.textContent = configState.whitelistUrl || "— log in —";
+  }
+
+  async function loadServerConfig() {
+    try {
+      const r = await fetch("/api/config");
+      if (!r.ok) return;
+      const d = await r.json();
+      if (d.publicUrl && !configState.serverBase) { configState.serverBase = d.publicUrl; updatePageInfo(); }
+    } catch (e) {}
+  }
+
+  function renderAccount() {
+    const el = document.getElementById("acct");
+    if (!el || !window.SkidAuth) return;
+    if (SkidAuth.isLoggedIn()) {
+      el.innerHTML = '<span class="acct-name">@' + escapeHtml(SkidAuth.state.username) + '</span> <button id="saveBtn" class="btn">Save page</button> <button id="logoutBtn" class="btn">Log out</button>';
+      document.getElementById("saveBtn").addEventListener("click", doSave);
+      document.getElementById("logoutBtn").addEventListener("click", () => { SkidAuth.logout(); renderAccount(); updatePageInfo(); setStatus("Logged out"); });
+    } else {
+      el.innerHTML = '<button id="loginBtn" class="btn">Log in / Sign up</button>';
+      document.getElementById("loginBtn").addEventListener("click", openAuth);
+    }
+  }
+
+  function openAuth() {
+    document.getElementById("authMsg").textContent = "Log in to save your page online. It's only editable with your password.";
+    document.getElementById("authModal").classList.remove("hidden");
+    document.getElementById("authUser").focus();
+  }
+  function closeAuth() { document.getElementById("authModal").classList.add("hidden"); }
+
+  async function afterAuth() {
+    closeAuth(); renderAccount();
+    try { loadProject(await SkidAuth.getProject()); } catch (e) {}
+    updatePageInfo();
+    setStatus("Signed in as @" + SkidAuth.state.username);
+  }
+  async function doLogin() {
+    try { await SkidAuth.login(document.getElementById("authUser").value.trim(), document.getElementById("authPass").value); await afterAuth(); }
+    catch (e) { document.getElementById("authMsg").textContent = "Login failed: " + e.message; }
+  }
+  async function doSignup() {
+    try { await SkidAuth.signup(document.getElementById("authUser").value.trim(), document.getElementById("authPass").value); await afterAuth(); }
+    catch (e) { document.getElementById("authMsg").textContent = "Sign up failed: " + e.message; }
+  }
+  async function doSave() {
+    if (!SkidAuth.isLoggedIn()) { openAuth(); return; }
+    try { await SkidAuth.putProject(currentProject()); setStatus("Saved to your page"); }
+    catch (e) { setStatus("Save failed: " + e.message); }
+  }
+  async function initAccount() {
+    if (!window.SkidAuth) return;
+    renderAccount();
+    if (await SkidAuth.restore()) {
+      renderAccount();
+      try { loadProject(await SkidAuth.getProject()); } catch (e) {}
+      updatePageInfo();
+    }
+  }
+
   window.addEventListener("DOMContentLoaded", () => {
     document.querySelectorAll(".tab").forEach((b) => b.addEventListener("click", () => switchTab(b.dataset.tab)));
     document.getElementById("copyBtn").addEventListener("click", copyTab);
@@ -692,7 +759,18 @@
     document.getElementById("buildBtn").addEventListener("click", buildScript);
     wireConfigForm();
     wireInterfaceForm();
-    wireRuntimeForm();
+
+    document.getElementById("authLogin").addEventListener("click", doLogin);
+    document.getElementById("authSignup").addEventListener("click", doSignup);
+    document.getElementById("authClose").addEventListener("click", closeAuth);
+    const cfgSb = document.getElementById("cfgServerBase");
+    if (cfgSb) cfgSb.addEventListener("input", () => { configState.serverBase = cfgSb.value.trim(); updatePageInfo(); });
+    const cfgWh = document.getElementById("cfgWebhook");
+    if (cfgWh) cfgWh.addEventListener("input", () => { configState.discordWebhook = cfgWh.value.trim(); });
+    const cfgWhName = document.getElementById("cfgWebhookName");
+    if (cfgWhName) cfgWhName.addEventListener("input", () => { configState.webhookUsername = cfgWhName.value; });
+    const cfgWhTmpl = document.getElementById("cfgWebhookTemplate");
+    if (cfgWhTmpl) cfgWhTmpl.addEventListener("input", () => { configState.webhookTemplate = cfgWhTmpl.value; });
 
     scriptWs = injectWs("scriptWorkspace", window.SCRIPT_TOOLBOX);
     scriptWs.addChangeListener(updateCode);
@@ -700,5 +778,7 @@
 
     window.addEventListener("resize", () => { if (scriptWs && activeTab === "script") Blockly.svgResize(scriptWs); });
     loadBundleTemplate();
+    loadServerConfig();
+    initAccount();
   });
 })();

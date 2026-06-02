@@ -5,3 +5,6 @@
 /build/
 /.tools/
 .DS_Store
+/dist/_interp_test.lua
+/data/
+/.claude/

@@ -1,6 +1,3 @@
--- UI construction helpers plus the live, mutable colour table the Interface
--- blocks recolour at runtime.
-
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Config = require(ReplicatedStorage:WaitForChild("SkidSS"):WaitForChild("Config"))
 

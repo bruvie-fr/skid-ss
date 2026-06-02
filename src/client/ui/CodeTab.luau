@@ -1,5 +1,3 @@
--- Raw Luau editor. Sends its text to the server to run with loadstring.
-
 local Theme = require(script.Parent.Parent.Theme)
 
 local CodeTab = {}

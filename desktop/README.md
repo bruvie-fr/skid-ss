@@ -50,18 +50,25 @@ Build artifacts land in `src-tauri/target/release/bundle/`.
 > If you've added/removed Lua files in the project, regenerate it with
 > `node tools/bundle.js` from the repo root before building Studio.
 
-## Preview the UI without building (no Rust)
+## Run in a browser (website)
 
-The frontend is plain static files, so you can open it in a browser:
+The frontend is plain static files — no Rust, no Tauri — so SkidSS Studio also
+runs as a website. From the repo root:
 
 ```sh
-python -m http.server --directory src 5599
-# then open http://localhost:5599
+node tools/serve-web.js          # serves desktop/src on http://localhost:5173
+# or: python -m http.server --directory src 5599
 ```
 
-Block editing, preview and Luau generation all work. **Build Script…** falls
-back to a normal browser download (the native save dialog only exists inside
-the Tauri app).
+Everything works: block editing, the Interface GUI builder, Luau generation,
+**Build .rbxmx…** (downloads the model straight from the browser) and **Load
+from existing SkidSS.lua…** (reads via a file picker). Serve it over HTTP — not
+`file://` — because the page fetches `bundle-template.txt`.
+
+To deploy, host the contents of `desktop/src/` on any static host (GitHub Pages,
+Netlify, Vercel, S3, …). Run `node tools/bundle.js` first so `bundle-template.txt`
+is current. **Copy Luau / Copy .lua** use the clipboard API, which needs HTTPS or
+localhost.
 
 ## Build Script flow
 

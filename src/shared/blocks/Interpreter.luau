@@ -1,7 +1,3 @@
--- Runs a block program (an array of statement nodes) against a host-supplied api.
--- A step budget makes it impossible for a block script to hang the game, and the
--- `allow` table lets the host reject blocks that aren't meant to run on its side.
-
 local Defs = require(script.Parent.Defs)
 
 local Interpreter = {}

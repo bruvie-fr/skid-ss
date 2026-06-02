@@ -14,36 +14,113 @@ the server-side runtime with blocks too.
   executor, and the windowed UI whitelisted players see.
 - **Single-file build** ([`dist/SkidSS.lua`](dist/SkidSS.lua)) — everything
   above, bundled into one Script the game owner pastes into ServerScriptService.
-- **SkidSS Studio** ([`desktop/`](desktop/README.md)) — a cross-platform desktop
-  app (Tauri, Windows + Linux) for authoring scripts, the executor UI, and the
-  server runtime with block code, then writing the single-file build for you.
-  Authoring tool only; it never connects to or runs on Roblox.
+- **SkidSS Studio** ([`desktop/`](desktop/README.md)) — a block-coding app for
+  authoring scripts, the executor UI, and the server runtime, then writing the
+  single-file build for you. Runs as a **desktop app** (Tauri, Windows + Linux)
+  or as a **website** — `node tools/serve-web.js`, or host `desktop/src/` on any
+  static host. Authoring tool only; it never connects to or runs on Roblox.
 
-## Install (recommended path: paste one Script)
+## Install
 
-1. **Build the bundle** (once):
+SkidSS is two pieces: a small **server** (`server.js`) that hosts the Studio site and
+your account / whitelist / webhook API, and the **executor model** you build there and
+paste into your own Roblox game. Pick the **Hosted** path for a live whitelist + Discord
+webhook, or the **Standalone** path for a single pasted Script with no backend.
+
+### Prerequisites
+
+- **[Node.js](https://nodejs.org) 18 or newer** — runs the server, the bundler, and the
+  static Studio. Check with `node --version`.
+- **[Git](https://git-scm.com)** — to clone the repo.
+- **Roblox Studio** — to install the model into a game you own.
+- *Optional:* **[Rojo](https://rojo.space)** (+ [Aftman](https://github.com/LPGhatguy/aftman))
+  to iterate on the Roblox source; **Rust + [Tauri](https://tauri.app) prerequisites** to
+  build the desktop app instead of using the website.
+
+### Hosted path (accounts + live whitelist + webhook)
+
+1. **Get the code.**
 
    ```sh
-   node tools/bundle.js
+   git clone https://github.com/bruvie-fr/skid-ss.git
+   cd skid-ss
    ```
 
-   Or open **SkidSS Studio**, customize, and hit **Build Script…** — same output.
+2. **Start the server.**
 
-2. **Paste into your game.** Open the game in Roblox Studio, paste the contents
-   of `dist/SkidSS.lua` as a new **Script** in **ServerScriptService**.
+   ```sh
+   node server.js              # serves the Studio + API on http://localhost:8080
+   ```
 
-3. **Add yourself to the whitelist.** At the top of the script:
+   It hosts the Studio site *and* the API on one origin. Accounts and projects are stored
+   as JSON under `data/` (created on first run, gitignored). Set `PORT` to change the port.
+
+3. **Make your page.** Open the server URL in a browser, click **Sign up** (top-right),
+   pick a username + password. Your whole project saves to your page and is editable only
+   with that password — **Log in** anytime to get back to it.
+
+4. **Build your executor** across the three tabs, then **Save page**:
+   - **Script** — snap blocks for the server runtime (`when a player joins`,
+     `define action`, plus any logic). Leave it empty for a plain code runner.
+   - **Interface** — lay out the in-game GUI, or use the executor preset for a ready-made
+     code box + output + run button.
+   - **Config** — add whitelisted **UserIds / usernames**, and your **Discord webhook URL**
+     (required — SkidSS proxies it to Discord for you; customise the message + bot name).
+
+5. **Download the model.** Click **Build .rbxmx…**. It bakes in your page's live-whitelist
+   URL and webhook proxy — no secrets, the password is never baked in.
+
+6. **Install it in your game** — see [In your Roblox game](#in-your-roblox-game).
+
+7. **Manage members live.** Add/remove people in **Config → Whitelist**, then **Save page**.
+   The game re-reads your list on join — no rebuild, no re-paste.
+
+   > For a **real** Roblox server (not just Studio) to reach your machine, the server needs
+   > a public URL — see [Going public](#going-public).
+
+### Standalone path (one Script, no backend)
+
+No accounts, live updates, or webhook — just a single Script you edit by hand:
+
+1. Build the bundle (or use **Build Script…** in the Studio):
+
+   ```sh
+   node tools/bundle.js        # writes dist/SkidSS.lua and dist/SkidSS.rbxmx
+   ```
+
+2. Paste `dist/SkidSS.lua` as a **Script** in **ServerScriptService**.
+3. Set the whitelist at the top of the script:
 
    ```lua
-   local WHITELIST_USERIDS = { [123456789] = true }  -- your UserId
-   local WHITELIST_NAMES   = { ["yourusername"] = true }  -- lower-case
+   local WHITELIST_USERIDS = { [123456789] = true }      -- your UserId
+   local WHITELIST_NAMES   = { ["yourusername"] = true } -- lower-case
    ```
 
-4. **Play.** Whitelisted players get the executor. **Right Shift** toggles it.
+### In your Roblox game
 
-That's it — one paste, one whitelist edit. The script creates remotes, gates
-every request behind the whitelist, and injects the client UI per player on
-join. No model files, no asset IDs, no HTTP calls.
+1. Open your game (one you **own**) in Roblox Studio.
+2. **Game Settings → Security → Allow HTTP Requests → On** (needed for the live whitelist
+   + webhook; the Standalone path works without it).
+3. Drag the `.rbxmx` into **ServerScriptService** (or paste `SkidSS.lua` as a Script).
+   Delete any older SkidSS first.
+4. Press **Play**. Whitelisted players get the executor; **Right Shift** toggles the
+   built-in window, and your custom GUI shows automatically.
+
+### Going public
+
+A live game server must reach your backend at a public HTTPS URL — `localhost` only works
+inside Studio on your own machine. The Studio reads the URL from `/api/config` and bakes
+it into the model. Any of:
+
+- **Deploy `server.js`** to any Node host — the public URL is auto-detected from the
+  request host / `PUBLIC_URL` / common platform variables.
+- **Your own domain** (e.g. `diyss.duckdns.org`): point it at the box and open the Studio
+  there, or run `PUBLIC_URL=https://diyss.duckdns.org node server.js`.
+- **Quick test from your own machine:** `node server.js --tunnel` opens a temporary public
+  URL via [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/).
+
+Run the server behind **HTTPS** in production — passwords are scrypt-hashed, but the
+session token and webhook still travel over the wire.
 
 ### What's in the bundle
 
@@ -63,19 +140,25 @@ When you re-build from Studio against an existing `SkidSS.lua`, only the two
 ## What's in it
 
 - **Whitelist** — only listed players ever receive the UI.
-- **Code tab** — a Luau editor inside the executor. Runs on the server via
-  `loadstring` (opt-in).
+- **Code tab** — a Luau editor inside the executor. Runs on the server via a
+  **built-in Luau interpreter** — no `loadstring`, no
+  `ServerScriptService.LoadStringEnabled` toggle. Works the moment the model is
+  pasted in. See [interpreter scope](#raw-lua-interpreter) for what it supports.
 - **Blocks tab** — build server scripts from blocks (loops, conditionals,
   variables, player actions). Sandboxed interpreter with step budget — can't
-  hang the game, works without `loadstring`.
+  hang the game.
 - **Interface tab** — block-edit the executor window (title, colours, toasts,
   quick buttons). Live preview in Studio.
-- **Custom runtime** — block-edit the server's join/leave/request hooks and
-  register named actions the executor can invoke. Built in Studio's Runtime tab,
-  baked into the bundle.
-- **Config in Studio** — Studio's Config tab edits the whitelist (UserIds +
-  names) and server limits with a form. **Build Script** stamps the result
-  into the bundle's CONFIG section — no need to hand-edit Lua.
+- **Server runtime in blocks** — the **Script** tab's blocks ARE the server
+  runtime: snap together `when a player joins`, `define action`, `reject request`,
+  and any logic. They're baked into the bundle and run server-side.
+- **Live whitelist** — with the backend (below), the executor fetches your
+  whitelist from your page on join, so you add/remove members on the site with no
+  rebuild. The baked CONFIG list is the offline fallback.
+- **Discord webhook (optional)** — set a webhook **proxy** URL (Roblox blocks
+  discord.com directly) and the executor logs who ran what, in which game.
+- **Config in Studio** — the Config tab edits the whitelist + server limits + your
+  page/webhook URLs; **Build .rbxmx** stamps them into the bundle's CONFIG section.
 
 ## Develop (Rojo)
 
@@ -94,6 +177,31 @@ rojo serve
 Edit [`src/server/Whitelist.luau`](src/server/Whitelist.luau) for the whitelist
 in dev mode. When you're ready to ship, run `node tools/bundle.js` and use the
 single-file Script.
+
+## Backend reference
+
+[`server.js`](server.js) is zero-dependency (Node built-ins + JSON files under `data/`).
+Endpoints:
+
+| Method / path | Auth | Purpose |
+| --- | --- | --- |
+| `POST /api/signup` · `POST /api/login` | – | create / sign in; returns a session token + pageKey |
+| `GET` · `PUT /api/project` | Bearer token | load / save your project |
+| `GET /api/config` | – | the server's public URL (for baking into the model) |
+| `GET /api/whitelist/:pageKey` | – (public) | `{ userIds, names }` the game reads on join |
+| `POST /api/webhook/:pageKey` | – | relays a usage post to your stored Discord webhook |
+| `GET /*` | – | the static Studio site from `desktop/src` |
+
+- Passwords are **scrypt-hashed**; sessions are random server-stored tokens. Run behind
+  **HTTPS** in production.
+- The public whitelist read exposes only the allow-list — knowing it grants nothing (adds
+  still need your password). The Discord webhook is stored on your page and **never** baked
+  into the game; the game posts to `/api/webhook/:pageKey`, which relays to Discord (Roblox
+  can't reach discord.com directly).
+- `data/` is gitignored. JSON-file storage suits self-hosting, not high scale.
+- **Offline:** without the backend, serve the Studio statically
+  (`node tools/serve-web.js`) — you just can't log in, save, or use the live whitelist /
+  webhook.
 
 ## Adding your own blocks
 
@@ -124,11 +232,34 @@ dist/SkidSS.lua       single-script build (paste into SSS)
 
 - The server re-checks the whitelist on every request and rejects wrong-side
   blocks; clients are never trusted.
-- Block scripts are bounded by a step budget and loop/wait caps
-  ([`Config.Limits`](src/shared/Config.luau)).
-- The raw Code tab is real `loadstring`. A non-yielding infinite loop in
-  hand-written Luau can still stall the server. That's why it's opt-in; prefer
-  blocks for anything you'd hand to other people.
+- Block scripts and the raw Code tab are both bounded by step / time / recursion
+  budgets and loop/wait caps ([`Config.Limits`](src/shared/Config.luau)), so a
+  runaway script (even `while true do end`) is aborted instead of stalling the
+  server.
+- The Code tab is a **trusted-user** tool: like `loadstring`, interpreted code
+  can do anything the server can. The budgets stop accidental freezes, not a
+  determined whitelisted user — so guard the whitelist accordingly.
 - The custom runtime's `onRequestReceived` hook can deny any request — use it
   to enforce game-specific rules (e.g. reject `mode == "lua"` from everyone but
   one UserId).
+
+### Raw-Lua interpreter
+
+The Code tab runs through a tree-walking Luau interpreter
+([`src/server/LuaInterp.luau`](src/server/LuaInterp.luau)) instead of
+`loadstring`. Because it runs inside real Luau, interpreted tables/functions are
+real values, so metatables, the standard library and the **whole Roblox API**
+(`game`, `workspace`, services, Instances, datatypes, `task`, …) work normally.
+
+**Supported:** locals/globals, multiple assignment & returns, varargs, full
+operators & precedence, `.`/`[]`/`:` access and calls, `if`/`while`/`repeat`,
+numeric & generic `for`, `break`, `return`, `continue`, functions/closures,
+metatables, and Luau compound assignment (`+=`, `..=`, …).
+
+**`require` works** — both `require(ModuleScript)` and `require(assetId)` for
+published code you own; required modules run as native Luau, so it doubles as the
+escape hatch for anything the interpreter's subset doesn't cover.
+
+**Not in v1:** full type annotations are parsed but **discarded** (only simple
+forms are tolerated; exotic types error), and there is no backtick string
+interpolation or `goto`/labels. Prefer untyped scripts.

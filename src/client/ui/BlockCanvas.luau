@@ -1,6 +1,3 @@
--- Renders a block program as a stack of editable rows. Control blocks nest their
--- bodies inwards. A "selection" marks where the palette inserts the next block.
-
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Defs = require(ReplicatedStorage:WaitForChild("SkidSS").blocks.Defs)
 local Theme = require(script.Parent.Parent.Theme)

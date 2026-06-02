@@ -1,7 +1,6 @@
 use std::fs;
 use std::path::Path;
 
-// Writes generated Luau to disk. The frontend picks the path via the dialog plugin.
 #[tauri::command]
 fn save_text(path: String, contents: String) -> Result<(), String> {
     if let Some(parent) = Path::new(&path).parent() {
@@ -10,8 +9,6 @@ fn save_text(path: String, contents: String) -> Result<(), String> {
     fs::write(&path, contents).map_err(|e| e.to_string())
 }
 
-// Reads a user-chosen file so Studio can round-trip an existing SkidSS.lua —
-// preserving the WHITELIST config when only the CUSTOM sections change.
 #[tauri::command]
 fn read_text(path: String) -> Result<String, String> {
     fs::read_to_string(&path).map_err(|e| e.to_string())

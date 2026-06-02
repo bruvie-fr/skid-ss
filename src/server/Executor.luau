@@ -1,49 +1,17 @@
--- Runs a request: either raw Luau (loadstring) or a block program (interpreter).
--- Block programs are always safe to run; raw Luau needs the game owner to enable
--- ServerScriptService.LoadStringEnabled.
-
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Shared = ReplicatedStorage:WaitForChild("SkidSS")
 local Config = require(Shared.Config)
 local Interpreter = require(Shared.blocks.Interpreter)
 local ServerApi = require(script.Parent.ServerApi)
+local LuaInterp = require(script.Parent.LuaInterp)
 
 local Executor = {}
 
 local SERVER_ALLOW = { server = true, both = true }
 
-local function collect(...)
-	local parts = {}
-	for i = 1, select("#", ...) do
-		parts[i] = tostring(select(i, ...))
-	end
-	return table.concat(parts, " ")
-end
-
 local function runLua(source, emit)
-	local sandbox = setmetatable({
-		print = function(...) emit(collect(...)) end,
-		warn = function(...) emit("[warn] " .. collect(...)) end,
-	}, { __index = getfenv() })
 
-	local ok, fn, compileError = pcall(loadstring, source)
-	if not ok then
-		return false, "loadstring is disabled — enable ServerScriptService.LoadStringEnabled, or use blocks"
-	end
-	if not fn then
-		local message = tostring(compileError)
-		if string.find(message, "not available") or string.find(message, "disabled") then
-			return false, "loadstring is disabled — enable ServerScriptService.LoadStringEnabled, or use blocks"
-		end
-		return false, "compile error: " .. message
-	end
-
-	setfenv(fn, sandbox)
-	local ran, runtimeError = pcall(fn)
-	if not ran then
-		return false, "runtime error: " .. tostring(runtimeError)
-	end
-	return true, "ran"
+	return LuaInterp.run(source, { emit = emit, limits = Config.Limits })
 end
 
 function Executor.run(player, payload, emit, runtime)

@@ -1,14 +1,3 @@
-// Bundles the multi-file Rojo source into one self-cloning Script the game
-// owner pastes into ServerScriptService. The bundle dispatches via
-// RunService:IsClient() — on first run it executes the server half, and the
-// server clones the same script (with RunContext = Client) into each
-// whitelisted player's PlayerGui to drive the executor UI client-side.
-//
-// Also writes desktop/src/bundle-template.txt so SkidSS Studio can round-trip
-// user customizations without re-running this script.
-//
-// Usage: node tools/bundle.js [--out dist/SkidSS.lua]
-
 const fs = require("fs");
 const path = require("path");
 
@@ -26,8 +15,11 @@ const SHARED = {
   BlocksLua: "src/shared/blocks/Lua.luau",
 };
 
-const SERVER_ORDER = ["ServerApi", "Whitelist", "Executor"];
+const SERVER_ORDER = ["LuaLexer", "LuaParser", "LuaInterp", "ServerApi", "Whitelist", "Executor"];
 const SERVER = {
+  LuaLexer: "src/server/LuaLexer.luau",
+  LuaParser: "src/server/LuaParser.luau",
+  LuaInterp: "src/server/LuaInterp.luau",
   ServerApi: "src/server/ServerApi.luau",
   Whitelist: "src/server/Whitelist.luau",
   Executor: "src/server/Executor.luau",
@@ -83,6 +75,9 @@ const SERVER_REWRITES = SHARED_REWRITES.concat([
   [/require\(script\.Whitelist\)/g, "SkidSS_Whitelist"],
   [/require\(script\.Executor\)/g, "SkidSS_Executor"],
   [/require\(script\.Parent\.ServerApi\)/g, "SkidSS_ServerApi"],
+  [/require\(script\.Parent\.LuaLexer\)/g, "SkidSS_LuaLexer"],
+  [/require\(script\.Parent\.LuaParser\)/g, "SkidSS_LuaParser"],
+  [/require\(script\.Parent\.LuaInterp\)/g, "SkidSS_LuaInterp"],
 ]);
 
 const CLIENT_REWRITES = SHARED_REWRITES.concat([
@@ -113,7 +108,7 @@ function buildModule(name, file, rewrites, extraTransform) {
 function whitelistTransform(src) {
   return src.replace(
     /-- BUNDLE:WHITELIST_DEFAULTS_BEGIN[\s\S]*?-- BUNDLE:WHITELIST_DEFAULTS_END/,
-    "Whitelist.UserIds = WHITELIST_USERIDS\nWhitelist.Names = WHITELIST_NAMES"
+    "Whitelist.UserIds = WHITELIST_USERIDS\nWhitelist.Names = WHITELIST_NAMES\nWhitelist.Url = WHITELIST_URL"
   );
 }
 
@@ -213,11 +208,11 @@ function assemble({ whitelistIds, whitelistNames, customRuntime, customInterface
     `local WHITELIST_USERIDS = ${whitelistIds || "{}"}`,
     `local WHITELIST_NAMES = ${whitelistNames || "{}"}`,
     SETTINGS_DEFAULT,
+    "-- Live whitelist URL (your SkidSS page) and Discord webhook proxy URL. Studio",
+    "-- fills these; both nil by default.",
+    "local WHITELIST_URL = nil",
+    "local WEBHOOK_URL = nil",
     "-- ===== END CONFIG =====",
-    "",
-    "-- ===== CUSTOM RUNTIME (written by Studio; safe to overwrite) =====",
-    customRuntime || TEMPLATE_RUNTIME_DEFAULT,
-    "-- ===== END CUSTOM RUNTIME =====",
     "",
     "-- ===== CUSTOM INTERFACE (written by Studio; safe to overwrite) =====",
     customInterface || TEMPLATE_INTERFACE_DEFAULT,
@@ -237,6 +232,12 @@ function assemble({ whitelistIds, whitelistNames, customRuntime, customInterface
     "end",
     "",
     "-- ===== SERVER (do not edit) =====",
+    "-- Server runtime: the default CustomRuntime table, then your Script-tab blocks",
+    "-- (hooks + actions) which override it. Server-only — never runs on the client.",
+    "-- ===== CUSTOM RUNTIME (written by Studio; safe to overwrite) =====",
+    customRuntime || TEMPLATE_RUNTIME_DEFAULT,
+    "-- ===== END CUSTOM RUNTIME =====",
+    "",
     buildServerBranch(),
     "-- ===== END SERVER =====",
   ];
@@ -249,8 +250,7 @@ function escapeCdata(text) {
 
 function buildRbxmx(bundleSource) {
   const cdata = escapeCdata(bundleSource);
-  // Disabled LocalScript child holds the same source. The server's injectClient
-  // clones it (with Disabled=false) into PlayerGui per whitelisted player.
+
   return [
     '<roblox version="4">',
     '\t<Item class="Script" referent="RBX0">',

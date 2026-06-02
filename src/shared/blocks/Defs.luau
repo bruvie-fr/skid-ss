@@ -1,7 +1,3 @@
--- Every block lives here. A def carries its shape (label/inputs/fields/bodies),
--- how it runs (eval for values, exec for statements), and how it compiles to Lua.
--- Add a block by calling register{}; the editor, interpreter and compiler pick it up automatically.
-
 local Util = require(script.Parent.Parent.Util)
 
 local Defs = {}
@@ -87,8 +83,6 @@ local function targetFields()
 	}
 end
 
--- Values -------------------------------------------------------------------
-
 register({
 	id = "_literal", category = "Values", kind = "value", side = "both", hidden = true,
 	eval = function(node)
@@ -125,8 +119,6 @@ register({
 	end,
 })
 
--- Variables ----------------------------------------------------------------
-
 register({
 	id = "var_get", category = "Variables", kind = "value", side = "both",
 	label = "value of %name",
@@ -159,8 +151,6 @@ register({
 	end,
 })
 
--- Operators ----------------------------------------------------------------
-
 register({
 	id = "op_arith", category = "Operators", kind = "value", side = "both",
 	label = "%a %op %b",
@@ -188,8 +178,6 @@ register({
 	toLua = function(node, c) return "(tostring(" .. c.in_("a") .. ") .. tostring(" .. c.in_("b") .. "))" end,
 })
 
--- Output -------------------------------------------------------------------
-
 register({
 	id = "print", category = "Output", kind = "statement", side = "both",
 	label = "print %text",
@@ -205,8 +193,6 @@ register({
 	exec = function(node, ctx, state) state.api.warn(tostring(ctx.eval(node.inputs.text))) end,
 	toLua = function(node, c) return c.pad .. "warn(" .. c.in_("text") .. ")" end,
 })
-
--- Control ------------------------------------------------------------------
 
 register({
 	id = "wait", category = "Control", kind = "statement", side = "both",
@@ -285,8 +271,6 @@ register({
 		return c.pad .. "while " .. compareLua(node, c) .. " do\n" .. c.body("do") .. "\n" .. c.pad .. "end"
 	end,
 })
-
--- Players (server side) ----------------------------------------------------
 
 register({
 	id = "players_count", category = "Players", kind = "value", side = "server",
@@ -375,8 +359,6 @@ register({
 			.. "); if _t and _d and _t.Character and _d.Character then _t.Character:PivotTo(_d.Character:GetPivot()) end end"
 	end,
 })
-
--- Interface (client side, edits the executor window itself) -----------------
 
 register({
 	id = "ui_set_title", category = "Interface", kind = "statement", side = "client",

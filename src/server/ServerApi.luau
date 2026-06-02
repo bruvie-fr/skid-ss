@@ -1,6 +1,3 @@
--- The surface that server-run block programs are allowed to touch. emit() sends a
--- console line back to the player who ran the script.
-
 local Players = game:GetService("Players")
 
 local ServerApi = {}

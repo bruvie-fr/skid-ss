@@ -1,5 +1,3 @@
--- Remote object names, plus build (server) and get (client) helpers.
-
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Config = require(script.Parent.Config)
 

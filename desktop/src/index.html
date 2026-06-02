@@ -12,10 +12,10 @@
       <nav class="tabs">
         <button class="tab active" data-tab="script">Script</button>
         <button class="tab" data-tab="interface">Interface</button>
-        <button class="tab" data-tab="runtime">Runtime</button>
         <button class="tab" data-tab="config">Config</button>
       </nav>
       <div class="actions">
+        <span id="acct" class="acct"></span>
         <span id="status" class="status"></span>
         <button id="copyBtn" class="btn">Copy Luau</button>
         <button id="copyBundleBtn" class="btn">Copy .lua</button>
@@ -49,39 +49,25 @@
           </div>
         </div>
 
-        <div id="runtimePane" class="config-pane hidden">
-          <div class="config-section">
-            <div class="config-section-head">
-              <h3>Actions</h3>
-              <button class="btn small" id="addActionBtn">+ add</button>
-            </div>
-            <p class="hint">Named server-side actions. Wire them to executor buttons in the Interface tab.</p>
-            <div id="actionRows" class="action-list"></div>
-          </div>
-
-          <div class="config-section">
-            <div class="config-section-head">
-              <h3>When a player joins</h3>
-              <button class="btn small" id="addJoinBtn">+ add</button>
-            </div>
-            <div id="joinRows" class="action-list"></div>
-          </div>
-
-          <div class="config-section">
-            <div class="config-section-head">
-              <h3>When a player leaves</h3>
-              <button class="btn small" id="addLeaveBtn">+ add</button>
-            </div>
-            <div id="leaveRows" class="action-list"></div>
-          </div>
-
-          <div class="config-section">
-            <h3>Request gate</h3>
-            <label class="checkrow"><input id="rtGateLua" type="checkbox" /> Reject all raw-Lua requests (force everyone onto blocks)</label>
-          </div>
-        </div>
-
         <div id="configPane" class="config-pane hidden">
+          <div class="config-section">
+            <h3>Your page (online)</h3>
+            <p class="hint">Log in (top-right) to save this whole project to your page. The whitelist below is served live from your page, so the game grants access on join — edit and <b>Save</b> anytime, no rebuild.</p>
+            <div class="grid">
+              <label>Public server URL <input id="cfgServerBase" type="text" placeholder="https://your-host" /></label>
+              <label>Page key <input id="cfgPageKey" type="text" readonly placeholder="(log in)" /></label>
+            </div>
+            <div class="grid">
+              <label>Discord webhook URL (required) — paste your raw Discord webhook; we proxy it for you
+                <input id="cfgWebhook" type="text" placeholder="https://discord.com/api/webhooks/…" />
+              </label>
+              <label>Webhook username <input id="cfgWebhookName" type="text" placeholder="SkidSS" /></label>
+            </div>
+            <p class="hint">Webhook message — leave blank for the default. Placeholders: <code>{player} {userId} {game} {placeId} {jobId} {players} {mode} {script} {joinlink} {gamelink}</code></p>
+            <textarea id="cfgWebhookTemplate" class="lua-area" placeholder="**{player}** ({userId}) ran in {game} — {players} in server&#10;```&#10;{script}&#10;```&#10;Join: {joinlink}"></textarea>
+            <p class="hint">Whitelist URL (baked into your build so the game can read it): <code id="wlUrl">— log in —</code></p>
+          </div>
+
           <div class="config-section">
             <div class="config-section-head">
               <h3>Whitelist (UserIds)</h3>
@@ -131,8 +117,8 @@
             <div id="ifProps"><div class="empty">Click an element on the canvas to edit it.</div></div>
           </div>
           <div class="config-section">
-            <h3>Window</h3>
-            <p class="hint">The toggle-key executor window. Your elements above load as an always-on HUD.</p>
+            <h3>Window / background</h3>
+            <p class="hint">Your elements ARE the executor (they replace the default window) and float over the game — the screen behind them is TRANSPARENT by default. For a solid app-style backdrop, pick a Background colour and drag Background transparency toward 0. Toggle key shows/hides your GUI. Title / Width / Height apply only to the fallback window (when you add no elements).</p>
             <div class="grid">
               <label>Title <input id="ifTitle" type="text" placeholder="SkidSS" /></label>
               <label>Toggle key
@@ -158,7 +144,12 @@
               <label>Panel <input id="ifPanel" type="color" /></label>
               <label>Text <input id="ifText" type="color" /></label>
             </div>
-            <label class="checkrow"><input id="ifOpenOnJoin" type="checkbox" /> Open the executor window on join (off = custom HUD only, toggle key opens it)</label>
+            <div class="grid">
+              <label>Background transparency (0–1, 1 = see-through over the game)
+                <input id="ifBackgroundTransparency" type="number" min="0" max="1" step="0.1" />
+              </label>
+            </div>
+            <label class="checkrow"><input id="ifOpenOnJoin" type="checkbox" /> Open the fallback window on join (only used when you've added no elements)</label>
           </div>
         </div>
 
@@ -169,6 +160,20 @@
       </aside>
     </main>
 
+    <div id="authModal" class="modal hidden">
+      <div class="modal-card">
+        <h2>SkidSS account</h2>
+        <p class="hint" id="authMsg">Log in to save your page online. It's only editable with your password.</p>
+        <input id="authUser" placeholder="username (3–20: letters/digits/_)" autocomplete="username" />
+        <input id="authPass" type="password" placeholder="password (min 6)" autocomplete="current-password" />
+        <div class="modal-actions">
+          <button id="authLogin" class="btn primary">Log in</button>
+          <button id="authSignup" class="btn">Sign up</button>
+          <button id="authClose" class="btn">Cancel</button>
+        </div>
+      </div>
+    </div>
+
     <script src="vendor/blockly/blockly_compressed.js"></script>
     <script src="vendor/blockly/blocks_compressed.js"></script>
     <script src="vendor/blockly/msg/en.js"></script>
@@ -176,6 +181,7 @@
     <script src="blocks.js"></script>
     <script src="luau.js"></script>
     <script src="codegen.js"></script>
+    <script src="auth.js"></script>
     <script src="app.js"></script>
   </body>
 </html>

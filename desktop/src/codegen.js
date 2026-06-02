@@ -1,6 +1,3 @@
-// Pure Lua codegen for SkidSS Studio's forms. No DOM / Blockly deps, so it can
-// be unit-tested under Node as well as loaded in the browser.
-
 (function (root, factory) {
   const api = factory();
   if (typeof module !== "undefined" && module.exports) module.exports = api;
@@ -15,82 +12,6 @@
     const g = parseInt(hex.slice(3, 5), 16) || 0;
     const b = parseInt(hex.slice(5, 7), 16) || 0;
     return "Color3.fromRGB(" + r + ", " + g + ", " + b + ")";
-  }
-
-  const VERBS = {
-    notify: { label: "Notify message", param: "text", noTarget: true },
-    kick: { label: "Kick", param: "reason" },
-    heal: { label: "Heal" },
-    kill: { label: "Kill" },
-    freeze: { label: "Freeze" },
-    unfreeze: { label: "Unfreeze" },
-    walkspeed: { label: "Set WalkSpeed", param: "number" },
-    health: { label: "Set Health", param: "number" },
-    bring: { label: "Bring to me" },
-  };
-  const ACTION_VERB_IDS = ["notify", "kick", "heal", "kill", "freeze", "unfreeze", "walkspeed", "health", "bring"];
-  const HOOK_VERB_IDS = ["heal", "freeze", "unfreeze", "walkspeed", "health", "kick"];
-
-  function verbBody(id, param, P) {
-    switch (id) {
-      case "notify": return "if emit then emit(" + q(param || "") + ') else print("[SkidSS] " .. ' + q(param || "") + ") end";
-      case "kick": return P + ":Kick(" + q(param || "Kicked") + ")";
-      case "heal": return "local _h = _hum(" + P + ") if _h then _h.Health = _h.MaxHealth end";
-      case "kill": return "local _h = _hum(" + P + ") if _h then _h.Health = 0 end";
-      case "freeze": return "local _h = _hum(" + P + ") if _h then _h.WalkSpeed = 0 _h.JumpPower = 0 _h.JumpHeight = 0 end";
-      case "unfreeze": return "local _h = _hum(" + P + ") if _h then _h.WalkSpeed = 16 _h.JumpPower = 50 _h.JumpHeight = 7.2 end";
-      case "walkspeed": return "local _h = _hum(" + P + ") if _h then _h.WalkSpeed = " + num(param, 16) + " end";
-      case "health": return "local _h = _hum(" + P + ") if _h then _h.Health = " + num(param, 100) + " end";
-      case "bring": return "if " + P + ".Character and player.Character then " + P + ".Character:PivotTo(player.Character:GetPivot()) end";
-      default: return "";
-    }
-  }
-
-  function actionDef(a) {
-    const name = (a.name || "").trim();
-    if (!name) return "";
-    const head = "CustomRuntime.customActions[" + q(name) + "] = function(player, args, emit)";
-    let body;
-    if (a.mode === "lua") {
-      body = (a.lua || "").replace(/\r/g, "").split("\n").map((l) => "\t" + l).join("\n");
-    } else {
-      const id = a.verb || "notify";
-      const meta = VERBS[id] || {};
-      if (meta.noTarget) {
-        body = "\t" + verbBody(id, a.param, "player");
-      } else {
-        const inner = verbBody(id, a.param, "t");
-        if (a.target === "all") {
-          body = "\tfor _, t in Players:GetPlayers() do " + inner + " end";
-        } else if (a.target === "name") {
-          body = "\tfor _, t in Players:GetPlayers() do if string.lower(t.Name) == string.lower(" + q(a.targetName || "") + ") then " + inner + " end end";
-        } else {
-          body = "\tlocal t = player " + inner;
-        }
-      }
-    }
-    return head + "\n" + body + "\nend";
-  }
-
-  function buildRuntimeTable(state) {
-    const L = [];
-    L.push('local Players = game:GetService("Players")');
-    L.push('local function _hum(p) local c = p and p.Character return c and c:FindFirstChildOfClass("Humanoid") end');
-    L.push("local CustomRuntime = {");
-    L.push("\tonPlayerAdded = function(player)");
-    state.join.forEach((r) => { if (r.verb) L.push("\t\tdo local t = player " + verbBody(r.verb, r.param, "t") + " end"); });
-    L.push("\tend,");
-    L.push("\tonPlayerRemoving = function(player)");
-    state.leave.forEach((r) => { if (r.verb) L.push("\t\tdo local t = player " + verbBody(r.verb, r.param, "t") + " end"); });
-    L.push("\tend,");
-    L.push("\tonRequestReceived = function(player, _payload)");
-    if (state.gateLua) L.push('\t\tif _payload.mode == "lua" then return false end');
-    L.push("\t\treturn true");
-    L.push("\tend,");
-    L.push("\tcustomActions = {},");
-    L.push("}");
-    state.actions.forEach((a) => { const d = actionDef(a); if (d) L.push(d); });
-    return L.join("\n");
   }
 
   function normalizeAsset(v) {
@@ -138,9 +59,6 @@
     return String(text).split("]]>").join("]]]]><![CDATA[>");
   }
 
-  // Wraps assembled bundle source in a Roblox .rbxmx model: a Script or
-  // ModuleScript named SkidSS with a disabled "Client" LocalScript child
-  // (same source). injectClient clones that child into PlayerGui.
   function buildRbxmx(source, className) {
     const cls = className === "ModuleScript" ? "ModuleScript" : "Script";
     const src = cls === "ModuleScript" ? source.replace(/\n*$/, "") + "\n\nreturn true\n" : source;
@@ -169,6 +87,7 @@
     L.push("\ttitle = " + q(state.title || "SkidSS") + ",");
     L.push("\taccent = " + hexToRgbLua(state.accent) + ",");
     L.push("\tbackground = " + hexToRgbLua(state.background) + ",");
+    L.push("\tbackgroundTransparency = " + num(state.backgroundTransparency, 0) + ",");
     L.push("\tpanel = " + hexToRgbLua(state.panel) + ",");
     L.push("\ttext = " + hexToRgbLua(state.text) + ",");
     L.push("\ttoggleKey = " + q(state.toggleKey || "RightShift") + ",");
@@ -204,6 +123,8 @@
       "\tmaxLoopIterations = " + state.settings.maxLoopIterations + ",",
       "\tmaxWaitSeconds = " + state.settings.maxWaitSeconds + ",",
       "}",
+      "local WHITELIST_URL = " + (state.whitelistUrl ? JSON.stringify(state.whitelistUrl) : "nil"),
+      "local WEBHOOK_URL = " + (state.webhookUrl ? JSON.stringify(state.webhookUrl) : "nil"),
     ].join("\n");
   }
 
@@ -221,11 +142,12 @@
     const settings = { maxSteps: 200000, maxLoopIterations: 100000, maxWaitSeconds: 30 };
     const setBlock = section.match(/SETTINGS\s*=\s*\{([\s\S]*?)\}/);
     if (setBlock) { const re = /(\w+)\s*=\s*(\d+)/g; let m; while ((m = re.exec(setBlock[1])) !== null) settings[m[1]] = Number(m[2]); }
-    return { userIds, names, settings };
+    const urlMatch = section.match(/WHITELIST_URL\s*=\s*"([^"]*)"/);
+    const webhookMatch = section.match(/WEBHOOK_URL\s*=\s*"([^"]*)"/);
+    return { userIds, names, settings, whitelistUrl: urlMatch ? urlMatch[1] : "", webhookUrl: webhookMatch ? webhookMatch[1] : "" };
   }
 
   return {
-    VERBS, ACTION_VERB_IDS, HOOK_VERB_IDS,
-    buildRuntimeTable, buildInterfaceConfig, buildConfigSection, parseConfigSection, buildRbxmx,
+    buildInterfaceConfig, buildConfigSection, parseConfigSection, buildRbxmx,
   };
 });

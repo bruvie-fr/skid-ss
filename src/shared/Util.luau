@@ -1,5 +1,3 @@
--- Small shared helpers.
-
 local Util = {}
 
 local idCounter = 0
