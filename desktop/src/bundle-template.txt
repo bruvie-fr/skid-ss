@@ -1315,6 +1315,7 @@ local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
+local Shared = ReplicatedStorage:WaitForChild("SkidSS")
 local Config = SkidSS_Config
 local Net = SkidSS_Net
 local Interpreter = SkidSS_BlocksInterpreter
@@ -1881,9 +1882,10 @@ return Window
 end)()
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Shared = ReplicatedStorage:WaitForChild("SkidSS")
 local Net = SkidSS_Net
 
-local CustomInterface = function() return {} end
+
 
 local allowed = Net.get(Net.RequestAccess):InvokeServer()
 if not allowed then
@@ -3286,15 +3288,9 @@ local HttpService = game:GetService("HttpService")
 
 local Whitelist = {}
 
-Whitelist.UserIds = {
-
-}
-
-Whitelist.Names = {
-
-}
-
-Whitelist.Url = nil
+Whitelist.UserIds = WHITELIST_USERIDS
+Whitelist.Names = WHITELIST_NAMES
+Whitelist.Url = WHITELIST_URL
 
 local live = { userIds = {}, names = {} }
 local lastFetch = 0
@@ -3340,6 +3336,7 @@ end)()
 
 local SkidSS_Executor = (function()
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Shared = ReplicatedStorage:WaitForChild("SkidSS")
 local Config = SkidSS_Config
 local Interpreter = SkidSS_BlocksInterpreter
 local ServerApi = SkidSS_ServerApi
@@ -3397,6 +3394,7 @@ if ReplicatedStorage:FindFirstChild("SkidSS_Net") then
 	return
 end
 
+local Shared = ReplicatedStorage:WaitForChild("SkidSS")
 local Net = SkidSS_Net
 
 local Whitelist = SkidSS_Whitelist
@@ -3439,12 +3437,7 @@ local function postWebhook(player, payload)
 	end)
 end
 
-local CustomRuntime = {
-	onPlayerAdded = function(_player) end,
-	onPlayerRemoving = function(_player) end,
-	onRequestReceived = function(_player, _payload) return true end,
-	customActions = {},
-}
+
 
 local folder = Net.build()
 local requestAccess = folder:FindFirstChild(Net.RequestAccess)
@@ -3464,7 +3457,27 @@ end)
 
 local lastRun = {}
 
-local function injectClient(_player) end
+local function injectClient(player)
+	local playerGui = player:WaitForChild("PlayerGui", 10)
+	if not playerGui or playerGui:FindFirstChild("SkidSSClient") then return end
+	-- Preferred: clone the pre-baked LocalScript child shipped in the .rbxmx.
+	local template = script:FindFirstChild("Client")
+	if template then
+		local clone = template:Clone()
+		clone.Name = "SkidSSClient"
+		clone.Disabled = false
+		clone.Parent = playerGui
+		return
+	end
+	-- Fallback: self-clone with a RunContext flip. Works on engines that honor
+	-- runtime RunContext changes; silently no-ops on the ones that don't.
+	local clone = script:Clone()
+	clone.Name = "SkidSSClient"
+	clone.Disabled = true
+	pcall(function() clone.RunContext = Enum.RunContext.Client end)
+	clone.Parent = playerGui
+	clone.Disabled = false
+end
 
 execute.OnServerEvent:Connect(function(player, payload)
 	if not Whitelist.isAllowed(player) or type(payload) ~= "table" then

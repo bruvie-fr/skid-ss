@@ -39,20 +39,14 @@ function read(rel) {
   return fs.readFileSync(path.join(root, rel), "utf8");
 }
 
-function stripMarkerBlock(src, name) {
-  const re = new RegExp(
-    "^[ \\t]*-- BUNDLE:" + name + "_BEGIN[\\s\\S]*?-- BUNDLE:" + name + "_END[ \\t]*\\n?",
-    "m"
-  );
-  return src.replace(re, "");
-}
-
-function replaceMarkerBlock(src, name, replacement) {
-  const re = new RegExp(
-    "^[ \\t]*-- BUNDLE:" + name + "_BEGIN[\\s\\S]*?-- BUNDLE:" + name + "_END[ \\t]*",
-    "m"
-  );
-  return src.replace(re, replacement);
+function replaceOnce(src, find, replacement, label) {
+  let hit = false;
+  const out = src.replace(find, () => {
+    hit = true;
+    return replacement;
+  });
+  if (!hit) throw new Error("bundle.js: build anchor not found: " + label + " (a source edit removed it)");
+  return out;
 }
 
 const SHARED_REWRITES = [
@@ -106,9 +100,11 @@ function buildModule(name, file, rewrites, extraTransform) {
 }
 
 function whitelistTransform(src) {
-  return src.replace(
-    /-- BUNDLE:WHITELIST_DEFAULTS_BEGIN[\s\S]*?-- BUNDLE:WHITELIST_DEFAULTS_END/,
-    "Whitelist.UserIds = WHITELIST_USERIDS\nWhitelist.Names = WHITELIST_NAMES\nWhitelist.Url = WHITELIST_URL"
+  return replaceOnce(
+    src,
+    /Whitelist\.UserIds = \{[\s\S]*?Whitelist\.Url = nil/,
+    "Whitelist.UserIds = WHITELIST_USERIDS\nWhitelist.Names = WHITELIST_NAMES\nWhitelist.Url = WHITELIST_URL",
+    "WHITELIST_DEFAULTS"
   );
 }
 
@@ -147,7 +143,7 @@ function buildSharedChunk() {
 function buildClientBranch() {
   const parts = CLIENT_ORDER.map((name) => buildModule(name, CLIENT[name], CLIENT_REWRITES));
   let body = read("src/client/init.client.luau");
-  body = stripMarkerBlock(body, "CUSTOM_INTERFACE");
+  body = replaceOnce(body, /local CustomInterface = function\(\) return \{\} end\n?/, "", "CUSTOM_INTERFACE");
   body = rewrite(body, CLIENT_REWRITES);
   parts.push(body);
   return parts.join("\n");
@@ -160,8 +156,8 @@ function buildServerBranch() {
     parts.push(buildModule(name, SERVER[name], SERVER_REWRITES, extra));
   }
   let body = read("src/server/init.server.luau");
-  body = stripMarkerBlock(body, "CUSTOM_RUNTIME");
-  body = replaceMarkerBlock(body, "INJECT", BUNDLE_INJECT);
+  body = replaceOnce(body, /local CustomRuntime = \{[\s\S]*?customActions = \{\},\s*\n\}\n?/, "", "CUSTOM_RUNTIME");
+  body = replaceOnce(body, "local function injectClient(_player) end", BUNDLE_INJECT, "INJECT");
   body = rewrite(body, SERVER_REWRITES);
   parts.push(body);
   return parts.join("\n");
